@@ -1,6 +1,8 @@
 package me.ishan.poweramp_jf
 
+import android.annotation.SuppressLint
 import android.os.Bundle
+import android.provider.DocumentsContract
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -62,11 +64,12 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@SuppressLint("DefaultLocale")
 @Composable
 fun JellyfinSettings(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val manager = remember { JellyfinClientManager(context) }
-    val cacheManager = remember { TrackCacheManager(context) }
+    val cacheManager = remember { TrackCacheManagerSingleton.getInstance(context) }
     val scope = rememberCoroutineScope()
 
     var url by remember { mutableStateOf(manager.getUrl()) }
@@ -75,6 +78,17 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
     var maxCacheSize by remember { mutableStateOf(manager.getMaxCacheSize().toString()) }
     var isLoading by remember { mutableStateOf(false) }
     var isAuthenticated by remember { mutableStateOf(manager.isAuthenticated()) }
+    var cacheBreakdown by remember { mutableStateOf<TrackCacheManager.CacheSizeBreakdown?>(null) }
+
+    // Calculate cache size breakdown on launch
+    LaunchedEffect(Unit) {
+        scope.launch(Dispatchers.IO) {
+            val breakdown = cacheManager.getCacheSizeBreakdown(context)
+            withContext(Dispatchers.Main) {
+                cacheBreakdown = breakdown
+            }
+        }
+    }
 
     Column(
         modifier = modifier
@@ -85,7 +99,7 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
         verticalArrangement = Arrangement.Top
     ) {
         Text(
-            text = "Jellyfin Configuration",
+            text = "Jellyfin Provider Configuration",
             style = MaterialTheme.typography.headlineMedium,
             modifier = Modifier.padding(top = 16.dp, bottom = 24.dp)
         )
@@ -122,7 +136,7 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
 
             Button(
                 onClick = {
-                    manager.logout()
+                    scope.launch { manager.logout() }
                     isAuthenticated = false
                 }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.error
@@ -174,6 +188,15 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
 
                         if (success) {
                             isAuthenticated = true
+
+                            context.contentResolver.notifyChange(
+                                DocumentsContract.buildRootsUri(
+                                    context.applicationContext.getString(
+                                        R.string.documents_authority
+                                    )
+                                ), null
+                            )
+
                             Toast.makeText(
                                 context, "Login Successful!", Toast.LENGTH_SHORT
                             ).show()
@@ -245,30 +268,163 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // TODO
-        Text(
-            text = "Currently cached: MB",
+        cacheBreakdown?.let { breakdown ->
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = "Currently cached: ${
+                        String.format(
+                            "%.2f MB", breakdown.totalSize / (1024.0 * 1024.0)
+                        )
+                    }",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
+                Text(
+                    text = "  • Partial files: ${
+                        String.format(
+                            "%.2f MB", breakdown.partialFilesSize / (1024.0 * 1024.0)
+                        )
+                    }",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "  • Complete files: ${
+                        String.format(
+                            "%.2f MB", breakdown.completeFilesSize / (1024.0 * 1024.0)
+                        )
+                    }",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "  • Album arts: ${
+                        String.format(
+                            "%.2f MB", breakdown.albumArtsSize / (1024.0 * 1024.0)
+                        )
+                    }",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "  • Database: ${
+                        String.format(
+                            "%.2f MB", breakdown.databaseSize / (1024.0 * 1024.0)
+                        )
+                    }",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        } ?: Text(
+            text = "Calculating cache size...",
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.align(Alignment.Start)
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Refresh cache stats button
+        OutlinedButton(
+            onClick = {
+                scope.launch(Dispatchers.IO) {
+                    val breakdown = cacheManager.getCacheSizeBreakdown(context)
+                    withContext(Dispatchers.Main) {
+                        cacheBreakdown = breakdown
+                        Toast.makeText(context, "Cache stats refreshed", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }, modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Refresh Cache Stats")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Cache management buttons
+        Button(
+            onClick = {
+                scope.launch(Dispatchers.IO) {
+                    cacheManager.deletePartialFiles(excludeFavourites = true)
+                    val breakdown = cacheManager.getCacheSizeBreakdown(context)
+                    withContext(Dispatchers.Main) {
+                        cacheBreakdown = breakdown
+                        Toast.makeText(
+                            context, "Partial files deleted (favourites kept)", Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
+        ) {
+            Text("Remove Partial Files")
+        }
 
         Spacer(modifier = Modifier.height(8.dp))
 
         Button(
             onClick = {
                 scope.launch(Dispatchers.IO) {
-                    val db = DatabaseManager.getInstance(context)
-                    db.resetDatabase()
+                    cacheManager.deleteAllTracks(excludeFavourites = true)
+                    val breakdown = cacheManager.getCacheSizeBreakdown(context)
                     withContext(Dispatchers.Main) {
-                        Toast.makeText(context, "Database Reset Successfully", Toast.LENGTH_SHORT).show()
+                        cacheBreakdown = breakdown
+                        Toast.makeText(
+                            context, "All tracks deleted (favourites kept)", Toast.LENGTH_SHORT
+                        ).show()
                     }
                 }
             },
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
         ) {
-            Text("Reset Database & Clear Cache")
+            Text("Remove All Downloaded Tracks")
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Button(
+            onClick = {
+                scope.launch(Dispatchers.IO) {
+                    cacheManager.deleteFavouriteTracks()
+                    val breakdown = cacheManager.getCacheSizeBreakdown(context)
+                    withContext(Dispatchers.Main) {
+                        cacheBreakdown = breakdown
+                        Toast.makeText(context, "Favourite tracks deleted", Toast.LENGTH_SHORT)
+                            .show()
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+        ) {
+            Text("Remove Favourite Tracks")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Button(
+            onClick = {
+                scope.launch(Dispatchers.IO) {
+                    val db = DatabaseManager.getInstance(context)
+                    cacheManager.deleteAllTracks(excludeFavourites = false)
+                    cacheManager.deleteAllAlbumArts()
+                    db.resetDatabase()
+                    val breakdown = cacheManager.getCacheSizeBreakdown(context)
+                    withContext(Dispatchers.Main) {
+                        cacheBreakdown = breakdown
+                        Toast.makeText(
+                            context, "Database Reset & Cache Cleared", Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+        ) {
+            Text("Reset Database & Clear All Cache")
         }
     }
 }

@@ -21,6 +21,7 @@ import org.jellyfin.sdk.api.client.extensions.authenticateUserByName
 import org.jellyfin.sdk.api.client.extensions.imageApi
 import org.jellyfin.sdk.api.client.extensions.itemsApi
 import org.jellyfin.sdk.api.client.extensions.lyricsApi
+import org.jellyfin.sdk.api.client.extensions.sessionApi
 import org.jellyfin.sdk.api.client.extensions.systemApi
 import org.jellyfin.sdk.api.client.extensions.userApi
 import org.jellyfin.sdk.api.client.extensions.userLibraryApi
@@ -209,7 +210,10 @@ class JellyfinClientManager(private val context: Context? = null) {
     /**
      * Logout and clear credentials
      */
-    fun logout() {
+    suspend fun logout() {
+        // invalidate the access token on remote server
+        getApiClient()?.sessionApi?.reportSessionEnded();
+
         accessToken = null
         currentUserId = null
 
@@ -289,6 +293,9 @@ class JellyfinClientManager(private val context: Context? = null) {
             result.content.items
         } catch (e: InvalidStatusException) {
             Log.w(TAG, "getAlbums limit=$limit startIndex=$startIndex received ${e.status} code")
+            if (e.status == 401) {
+                accessToken = null
+            }
             emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get albums", e)
@@ -317,6 +324,9 @@ class JellyfinClientManager(private val context: Context? = null) {
             result.content.items
         } catch (e: InvalidStatusException) {
             Log.w(TAG, "getAlbumTracks $albumId received ${e.status} code")
+            if (e.status == 401) {
+                accessToken = null
+            }
             emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get album tracks", e)
@@ -367,6 +377,9 @@ class JellyfinClientManager(private val context: Context? = null) {
             return@withContext metadata
         } catch (e: InvalidStatusException) {
             Log.w(TAG, "getItem item=$trackId received ${e.status} code, returning stale data")
+            if (e.status == 401) {
+                accessToken = null
+            }
             meta
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get item, returning stale data", e)
@@ -427,6 +440,9 @@ class JellyfinClientManager(private val context: Context? = null) {
                 TAG,
                 "downloadTrack track=$trackId offset=$byteOffset length=$byteLength received ${e.status} code"
             )
+            if (e.status == 401) {
+                accessToken = null
+            }
             false
         } catch (e: Exception) {
             Log.w(TAG, "Download ended for track $trackId: ${e.message}")
@@ -472,6 +488,9 @@ class JellyfinClientManager(private val context: Context? = null) {
             true
         } catch (e: InvalidStatusException) {
             Log.w(TAG, "downloadAlbumArt item=$itemId sizeHint=$sizeHint received ${e.status} code")
+            if (e.status == 401) {
+                accessToken = null
+            }
             false
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get Album Art for $itemId", e)
@@ -522,6 +541,9 @@ class JellyfinClientManager(private val context: Context? = null) {
             LyricsMetadata(trackId, lyrics, isSynced)
         } catch (e: InvalidStatusException) {
             Log.w(TAG, "getLyrics track=$trackId received ${e.status} code, returning stale data")
+            if (e.status == 401) {
+                accessToken = null
+            }
             data
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get lyrics for $trackId, returning stale data", e)

@@ -173,6 +173,12 @@ class MediaDatabaseHelper(context: Context?) :
             )
         """.trimIndent()
         db.execSQL(createMetaTable)
+
+        // Create indices for frequently queried columns
+        db.execSQL("CREATE INDEX idx_last_accessed ON $TABLE_METADATA($COL_LAST_ACCESSED)")
+        db.execSQL("CREATE INDEX idx_last_fetched ON $TABLE_METADATA($COL_LAST_FETCHED)")
+        db.execSQL("CREATE INDEX idx_state ON $TABLE_METADATA($COL_META_STATE)")
+        db.execSQL("CREATE INDEX idx_is_favourite ON $TABLE_METADATA($COL_META_IS_FAVOURITE)")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -470,14 +476,13 @@ class MediaDatabaseHelper(context: Context?) :
             if (lastFetched == null) {
                 // We got a request to open this song because of the cache in poweramp,
                 // but we have no other data for it!
-                // Set this to 0 so it'll pull whenever poweramp tries to read it next.
+                // Set this to 0 so it'll pull full data whenever poweramp tries to read it next.
                 values.put(COL_LAST_FETCHED, 0)
             }
 
             upsertData(id, values)
         }
     }
-
 
     fun upsertData(id: UUID, values: ContentValues): Int {
         val db = writableDatabase
@@ -515,5 +520,90 @@ class MediaDatabaseHelper(context: Context?) :
     fun clearAll() {
         val db = writableDatabase
         db.delete(TABLE_METADATA, null, null)
+    }
+
+    fun getAllTracks(state: ContentState?, excludeFavourites: Boolean): List<UUID> {
+        val db = readableDatabase
+        val tracks = mutableListOf<UUID>()
+
+        val selection = if (state != null) {
+            if (excludeFavourites) {
+                "$COL_META_STATE == ? AND $COL_META_IS_FAVOURITE == 0"
+            } else {
+                "$COL_META_STATE == ?"
+            }
+        } else if (excludeFavourites) {
+            "$COL_META_IS_FAVOURITE == 0"
+        } else {
+            ""
+        }
+
+        val selectionArgs = if (state != null) {
+            arrayOf(state.name)
+        } else {
+            arrayOf()
+        }
+
+        db.query(
+            TABLE_METADATA, arrayOf(COL_META_ID), selection, selectionArgs, null, null, null
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val id = cursor.getString(cursor.getColumnIndexOrThrow(COL_META_ID))
+                tracks.add(UUID.fromString(id))
+            }
+        }
+
+        return tracks
+    }
+
+    fun deleteAllTracks(state: ContentState?, excludeFavourites: Boolean = false) {
+        val db = writableDatabase
+
+        val selection = if (state != null) {
+            if (excludeFavourites) {
+                "$COL_META_STATE == ? AND $COL_META_IS_FAVOURITE == 0"
+            } else {
+                "$COL_META_STATE == ?"
+            }
+        } else if (excludeFavourites) {
+            "$COL_META_IS_FAVOURITE == 0"
+        } else {
+            ""
+        }
+
+        val selectionArgs = if (state != null) {
+            arrayOf(state.name)
+        } else {
+            arrayOf()
+        }
+
+        db.delete(TABLE_METADATA, selection, selectionArgs)
+    }
+
+    fun getFavouriteTracks(): List<UUID> {
+        val db = readableDatabase
+        val tracks = mutableListOf<UUID>()
+
+        db.query(
+            TABLE_METADATA,
+            arrayOf(COL_META_ID),
+            "$COL_META_IS_FAVOURITE == 1",
+            null,
+            null,
+            null,
+            null
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val id = cursor.getString(cursor.getColumnIndexOrThrow(COL_META_ID))
+                tracks.add(UUID.fromString(id))
+            }
+        }
+
+        return tracks
+    }
+
+    fun deleteFavouriteTracks() {
+        val db = writableDatabase
+        db.delete(TABLE_METADATA, "$COL_META_IS_FAVOURITE == 1", null)
     }
 }

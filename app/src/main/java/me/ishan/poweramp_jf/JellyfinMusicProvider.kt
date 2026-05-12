@@ -78,9 +78,7 @@ class JellyfinMusicProvider : DocumentsProvider() {
                 context = ctx,
             )
 
-            cacheManager = TrackCacheManager(
-                context = ctx, maxCacheSizeMB = jellyfinClient.getMaxCacheSize()
-            )
+            cacheManager = TrackCacheManagerSingleton.getInstance(context = ctx)
 
             handlerThread = HandlerThread("JellyfinSAFProxyThread")
             handlerThread.start()

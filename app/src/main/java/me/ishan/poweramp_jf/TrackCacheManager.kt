@@ -1,4 +1,4 @@
-package me.ishan.poweramp_jf;
+package me.ishan.poweramp_jf
 
 import android.content.Context
 import android.graphics.Point
@@ -14,7 +14,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
-import okio.IOException
 import org.jellyfin.sdk.model.UUID
 import java.io.File
 import java.nio.ByteBuffer
@@ -41,7 +40,6 @@ class RefCountedAsyncFileChannel(
     }
 
     fun acquire(): AsynchronousFileChannel {
-
         return lock.write {
             if (channel == null) {
                 channel = AsynchronousFileChannel.open(
@@ -79,6 +77,19 @@ class RefCountedAsyncFileChannel(
     }
 }
 
+object TrackCacheManagerSingleton {
+    private var INSTANCE: TrackCacheManager? = null
+
+    fun getInstance(context: Context): TrackCacheManager {
+        return INSTANCE ?: synchronized(this) {
+            INSTANCE ?: TrackCacheManager(
+                context.applicationContext,
+                maxCacheSizeMB = JellyfinClientManager(context).getMaxCacheSize()
+            ).also { INSTANCE = it }
+        }
+    }
+}
+
 class TrackCacheManager(
     context: Context, maxCacheSizeMB: Long = 2048
 ) {
@@ -99,10 +110,10 @@ class TrackCacheManager(
             RefCountedAsyncFileChannel(
                 File(cacheDir, "$trackId.cache"), "rw", size, onClosed = {
                     activeChunkDownloads.filterKeys { it.first == trackId }.forEach { (key, job) ->
-                            job.cancel()
-                            activeChunkDownloads.remove(key)
-                            chunkProgress.remove(key)
-                        }
+                        job.cancel()
+                        activeChunkDownloads.remove(key)
+                        chunkProgress.remove(key)
+                    }
                     fileChannels.remove(trackId)
                     trackBitSets.remove(trackId)
                 })
@@ -130,7 +141,6 @@ class TrackCacheManager(
             db.markOpenedForStreaming(trackId)
         }
     }
-
 
     suspend fun onReadTrack(
         trackId: UUID,
@@ -241,6 +251,129 @@ class TrackCacheManager(
 
         val success = jellyfinClient.downloadAlbumArt(itemId, thumbFile, sizeHint)
         if (success) thumbFile else null
+    }
+
+    fun deletePartialFiles(excludeFavourites: Boolean = true) {
+        val partialTracks = db.getAllTracks(ContentState.PARTIAL, excludeFavourites)
+        partialTracks.forEach { trackId ->
+            val file = File(cacheDir, "$trackId.cache")
+            if (file.exists()) {
+                file.delete()
+                Log.d(TAG, "Deleted partial file: $trackId")
+            }
+        }
+        db.deleteAllTracks(ContentState.PARTIAL, excludeFavourites)
+        Log.i(TAG, "Deleted ${partialTracks.size} partial files")
+    }
+
+    fun deleteAllAlbumArts(): Int {
+        val thumbFiles = thumbDir.listFiles() ?: return 0
+        var count = 0
+        thumbFiles.forEach { file ->
+            if (file.delete()) {
+                count++
+            }
+        }
+        Log.i(TAG, "Deleted $count album art files")
+        return count
+    }
+
+    fun deleteAllTracks(excludeFavourites: Boolean = true) {
+        val allTracks = db.getAllTracks(null, excludeFavourites)
+        allTracks.forEach { trackId ->
+            val file = File(cacheDir, "$trackId.cache")
+            if (file.exists()) {
+                file.delete()
+                Log.d(TAG, "Deleted track file: $trackId")
+            }
+        }
+        db.deleteAllTracks(null, excludeFavourites)
+
+        Log.i(TAG, "Deleted ${allTracks.size} track files")
+    }
+
+    fun deleteFavouriteTracks() {
+        val favouriteTracks = db.getFavouriteTracks()
+        favouriteTracks.forEach { trackId ->
+            val file = File(cacheDir, "$trackId.cache")
+            if (file.exists()) {
+                file.delete()
+                Log.d(TAG, "Deleted favourite track file: $trackId")
+            }
+        }
+        db.deleteFavouriteTracks()
+        Log.i(TAG, "Deleted ${favouriteTracks.size} favourite track files")
+    }
+
+    data class CacheSizeBreakdown(
+        val partialFilesSize: Long,
+        val completeFilesSize: Long,
+        val albumArtsSize: Long,
+        val databaseSize: Long
+    ) {
+        val totalSize: Long
+            get() = partialFilesSize + completeFilesSize + albumArtsSize + databaseSize
+    }
+
+    fun getCacheSize(): Long {
+        var totalSize = 0L
+
+        // Calculate tracks cache
+        cacheDir.listFiles()?.forEach { file ->
+            totalSize += file.length()
+        }
+
+        // Calculate thumbnails cache
+        thumbDir.listFiles()?.forEach { file ->
+            totalSize += file.length()
+        }
+
+        return totalSize
+    }
+
+    fun getCacheSizeBreakdown(context: Context): CacheSizeBreakdown {
+        var partialSize = 0L
+        var completeSize = 0L
+
+        val partialTracks = db.getAllTracks(ContentState.PARTIAL, false).toSet()
+
+        cacheDir.listFiles()?.forEach { file ->
+            val trackId = try {
+                UUID.fromString(file.nameWithoutExtension)
+            } catch (e: Exception) {
+                null
+            }
+
+            if (trackId != null) {
+                if (partialTracks.contains(trackId)) {
+                    // For partial files: calculate actual usage from chunks bitset
+                    val record = db.getMediaCacheRecord(trackId)
+                    partialSize += if (record != null) {
+                        record.getChunks().cardinality().toLong() * MediaCacheRecord.CHUNK_SIZE
+                    } else {
+                        0L
+                    }
+                } else {
+                    // For complete files: file.length() is accurate
+                    completeSize += file.length()
+                }
+            }
+        }
+
+        var albumArtsSize = 0L
+        thumbDir.listFiles()?.forEach { file ->
+            albumArtsSize += file.length()
+        }
+
+        val dbFile = context.getDatabasePath("jellyfin_media_cache.db")
+        val dbSize = if (dbFile.exists()) dbFile.length() else 0L
+
+        return CacheSizeBreakdown(
+            partialFilesSize = partialSize,
+            completeFilesSize = completeSize,
+            albumArtsSize = albumArtsSize,
+            databaseSize = dbSize
+        )
     }
 
     fun shutdown() {

@@ -27,7 +27,7 @@
 
         <provider
             android:name=".JellyfinMusicProvider"
-            android:authorities="jellyfin.music"
+            android:authorities="@string/documents_authority"
             android:enabled="true"
             android:exported="true"
             android:directBootAware="true"
