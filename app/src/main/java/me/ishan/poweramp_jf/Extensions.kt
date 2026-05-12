@@ -49,7 +49,7 @@ suspend fun AsynchronousFileChannel.writeAt(
     var currentOffset = fileOffset
 
     while (buffer.hasRemaining()) {
-        val written: Int = writeSuspend(buffer, currentOffset) ?: break
+        val written: Int = writeSuspend(buffer, currentOffset)
         totalWritten += written
         currentOffset += written
     }

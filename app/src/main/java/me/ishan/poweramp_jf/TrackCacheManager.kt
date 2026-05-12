@@ -26,7 +26,10 @@ import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.write
 
 class RefCountedAsyncFileChannel(
-    private val file: File, private val mode: String = "rw", private val size: Long
+    private val file: File,
+    private val mode: String = "rw",
+    private val size: Long,
+    private val onClosed: (() -> Unit)
 ) {
     private val lock = ReentrantReadWriteLock()
     private var refCount = 0
@@ -68,6 +71,7 @@ class RefCountedAsyncFileChannel(
             if (refCount == 0 && channel != null) {
                 channel?.close()
                 channel = null
+                onClosed.invoke()
             }
         }
     }
@@ -91,7 +95,10 @@ class TrackCacheManager(
 
     private fun getFileHandle(trackId: UUID, size: Long): RefCountedAsyncFileChannel {
         return fileChannels.computeIfAbsent(trackId) {
-            RefCountedAsyncFileChannel(File(cacheDir, "$trackId.cache"), "rw", size)
+            RefCountedAsyncFileChannel(File(cacheDir, "$trackId.cache"), "rw", size, onClosed = {
+                fileChannels.remove(trackId)
+                trackBitSets.remove(trackId)
+            })
         }
     }
 
@@ -176,7 +183,8 @@ class TrackCacheManager(
                     } finally {
                         activeChunkDownloads.remove(key)
                         chunkProgress.remove(key)
-                        db.updateChunks(trackId, synchronized(chunks) { chunks.clone() as BitSet })
+                        db.updateChunks(
+                            trackId, synchronized(chunks) { chunks })
                         progressSignal.tryEmit(Unit)
                     }
                 }

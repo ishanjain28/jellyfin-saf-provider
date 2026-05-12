@@ -104,6 +104,7 @@ class JellyfinMusicProvider : DocumentsProvider() {
                 DocumentsContract.Root.COLUMN_FLAGS, DocumentsContract.Root.FLAG_SUPPORTS_IS_CHILD
             )
             add(DocumentsContract.Root.COLUMN_TITLE, "Jellyfin Music")
+            add(DocumentsContract.Root.COLUMN_SUMMARY, "Your Music Library")
             add(DocumentsContract.Root.COLUMN_DOCUMENT_ID, ROOT_ID)
         }
 
@@ -431,7 +432,6 @@ class JellyfinMusicProvider : DocumentsProvider() {
                         "openViaProxyFd onRelease ${documentId.trackId} from ${documentId.albumId}"
                     )
                     cacheFile.release()
-
                 }
             }, handler
         )
