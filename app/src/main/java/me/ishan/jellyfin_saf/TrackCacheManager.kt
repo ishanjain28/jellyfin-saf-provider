@@ -106,8 +106,13 @@ object TrackCacheManagerSingleton {
 }
 
 class TrackCacheManager(
-    context: Context, maxCacheSizeMB: Long = 2048
+    private val context: Context, private var maxCacheSizeMB: Long = 2048
 ) {
+    fun setMaxCacheSizeMB(sizeMB: Long) {
+        maxCacheSizeMB = sizeMB
+        Log.d(TAG, "Max cache size updated to $maxCacheSizeMB MB")
+    }
+
     private val tracksDir = File(context.filesDir, "jellyfin_tracks").apply { mkdirs() }
     private val thumbDir = File(context.cacheDir, "jellyfin_thumbs").apply { mkdirs() }
     private val db = DatabaseManager.getInstance(context)
@@ -119,6 +124,77 @@ class TrackCacheManager(
     private val progressSignal = MutableSharedFlow<Unit>(
         replay = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
+
+    private var evictionJob: Job? = null
+
+    /**
+     * Public method to trigger cache eviction.
+     * Loops until cache is under the limit (or 90% of it).
+     */
+    fun performEviction(onComplete: (Int) -> Unit) {
+        if (evictionJob?.isActive == true) return
+
+        evictionJob = scope.launch {
+            var evictedCount = 0
+            try {
+                val limitBytes = maxCacheSizeMB * 1024 * 1024
+                var breakdown = getCacheSizeBreakdown()
+                var currentSize = breakdown.totalSize
+
+                if (currentSize <= limitBytes) {
+                    onComplete(0)
+                    return@launch
+                }
+
+                Log.i(
+                    TAG, "Manual eviction started. Current size: $currentSize, Limit: $limitBytes"
+                )
+
+                // Get the oldest tracks (excluding favorites)
+                val oldestTracks = db.getOldestAccessedTracks(excludeFavourites = true)
+
+                for (record in oldestTracks) {
+                    // Don't evict currently open files or active downloads
+                    if (fileChannels.containsKey(record.id) || activeChunkDownloads.keys.any { it.first == record.id }) {
+                        continue
+                    }
+
+                    val file = record.getFile(tracksDir)
+                    val fileSize = if (record.state == ContentState.COMPLETE) {
+                        file.length()
+                    } else {
+                        record.getChunks().cardinality() * MediaCacheRecord.CHUNK_SIZE
+                    }
+
+                    if (file.exists()) {
+                        if (file.delete()) {
+                            evictedCount++
+                            currentSize -= fileSize
+                            Log.d(TAG, "Evicted track ${record.id} (saved ${fileSize / 1024} KB)")
+                        }
+                    }
+                    db.deleteTrackRecord(record.id)
+
+                    // Evict until we are at 90% of limit
+                    if (currentSize <= limitBytes * 0.9) {
+                        break
+                    }
+                }
+
+                Log.i(
+                    TAG,
+                    "Manual eviction finished. Evicted $evictedCount tracks. New size: $currentSize"
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Error during manual cache eviction", e)
+            } finally {
+                withContext(Dispatchers.Main) {
+                    onComplete(evictedCount)
+                }
+            }
+        }
+    }
+
 
     private fun getFileHandle(trackId: UUID, size: Long): RefCountedAsyncFileChannel {
         return fileChannels.computeIfAbsent(trackId) {
@@ -204,7 +280,7 @@ class TrackCacheManager(
                         if (synchronized(chunks) { chunks.cardinality() } >= totalChunks) {
                             db.updateState(trackId, ContentState.COMPLETE)
                             Log.d(
-                                TAG, "jellyfin track=${entry.id} marked COMPLETE!"
+                                TAG, "jellyfin track=${trackId} marked COMPLETE!"
                             )
                         }
                     }
@@ -328,7 +404,7 @@ class TrackCacheManager(
             get() = partialFilesSize + completeFilesSize + albumArtsSize + databaseSize
     }
 
-    fun getCacheSizeBreakdown(context: Context): CacheSizeBreakdown {
+    fun getCacheSizeBreakdown(): CacheSizeBreakdown {
         var partialSize = 0L
         var partialNum = 0
         var completeSize = 0L

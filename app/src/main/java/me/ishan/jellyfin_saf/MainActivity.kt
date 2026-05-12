@@ -79,11 +79,12 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
     var isLoading by remember { mutableStateOf(false) }
     var isAuthenticated by remember { mutableStateOf(manager.isAuthenticated()) }
     var cacheBreakdown by remember { mutableStateOf<TrackCacheManager.CacheSizeBreakdown?>(null) }
+    var isEvicting by remember { mutableStateOf(false) }
 
     // Calculate cache size breakdown on launch
     LaunchedEffect(Unit) {
         scope.launch(Dispatchers.IO) {
-            val breakdown = cacheManager.getCacheSizeBreakdown(context)
+            val breakdown = cacheManager.getCacheSizeBreakdown()
             withContext(Dispatchers.Main) {
                 cacheBreakdown = breakdown
             }
@@ -257,7 +258,10 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
             onValueChange = {
                 if (it.isEmpty() || it.all { char -> char.isDigit() }) {
                     maxCacheSize = it
-                    it.toLongOrNull()?.let { size -> manager.setMaxCacheSize(size) }
+                    it.toLongOrNull()?.let { size -> 
+                        manager.setMaxCacheSize(size)
+                        cacheManager.setMaxCacheSizeMB(size)
+                    }
                 }
             },
             label = { Text("Max Cache Size (MB)") },
@@ -338,7 +342,7 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
         OutlinedButton(
             onClick = {
                 scope.launch(Dispatchers.IO) {
-                    val breakdown = cacheManager.getCacheSizeBreakdown(context)
+                    val breakdown = cacheManager.getCacheSizeBreakdown()
                     withContext(Dispatchers.Main) {
                         cacheBreakdown = breakdown
                         Toast.makeText(context, "Cache stats refreshed", Toast.LENGTH_SHORT).show()
@@ -349,6 +353,37 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
             Text("Refresh Cache Stats")
         }
 
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Eviction button
+        Button(
+            onClick = {
+                isEvicting = true
+                cacheManager.performEviction { count ->
+                    isEvicting = false
+                    // Refresh breakdown
+                    scope.launch(Dispatchers.IO) {
+                        val breakdown = cacheManager.getCacheSizeBreakdown()
+                        withContext(Dispatchers.Main) {
+                            cacheBreakdown = breakdown
+                            Toast.makeText(context, "Evicted $count tracks", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !isEvicting,
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+        ) {
+            if (isEvicting) {
+                CircularProgressIndicator(modifier = Modifier.size(24.dp), color = MaterialTheme.colorScheme.onSecondary)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Evicting...")
+            } else {
+                Text("Evict Old Tracks")
+            }
+        }
+
         Spacer(modifier = Modifier.height(16.dp))
 
         // Cache management buttons
@@ -356,7 +391,7 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
             onClick = {
                 scope.launch(Dispatchers.IO) {
                     cacheManager.deletePartialFiles(excludeFavourites = true)
-                    val breakdown = cacheManager.getCacheSizeBreakdown(context)
+                    val breakdown = cacheManager.getCacheSizeBreakdown()
                     withContext(Dispatchers.Main) {
                         cacheBreakdown = breakdown
                         Toast.makeText(
@@ -377,7 +412,7 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
             onClick = {
                 scope.launch(Dispatchers.IO) {
                     cacheManager.deleteAllTracks(excludeFavourites = true)
-                    val breakdown = cacheManager.getCacheSizeBreakdown(context)
+                    val breakdown = cacheManager.getCacheSizeBreakdown()
                     withContext(Dispatchers.Main) {
                         cacheBreakdown = breakdown
                         Toast.makeText(
@@ -398,7 +433,7 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
             onClick = {
                 scope.launch(Dispatchers.IO) {
                     cacheManager.deleteFavouriteTracks()
-                    val breakdown = cacheManager.getCacheSizeBreakdown(context)
+                    val breakdown = cacheManager.getCacheSizeBreakdown()
                     withContext(Dispatchers.Main) {
                         cacheBreakdown = breakdown
                         Toast.makeText(context, "Favourite tracks deleted", Toast.LENGTH_SHORT)
@@ -421,7 +456,7 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
                     cacheManager.deleteAllTracks(excludeFavourites = false)
                     cacheManager.deleteAllAlbumArts()
                     db.resetDatabase()
-                    val breakdown = cacheManager.getCacheSizeBreakdown(context)
+                    val breakdown = cacheManager.getCacheSizeBreakdown()
                     withContext(Dispatchers.Main) {
                         cacheBreakdown = breakdown
                         Toast.makeText(

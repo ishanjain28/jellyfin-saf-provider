@@ -600,4 +600,61 @@ class MediaDatabaseHelper(context: Context?) :
         val db = writableDatabase
         db.delete(TABLE_METADATA, "$COL_META_IS_FAVOURITE == 1", null)
     }
+
+    /**
+     * Gets all tracks that have some cached content (COMPLETE or PARTIAL),
+     * ordered by last access time (oldest first).
+     * Excludes favorites.
+     */
+    fun getOldestAccessedTracks(excludeFavourites: Boolean = true): List<MediaCacheRecord> {
+        val db = readableDatabase
+        val records = mutableListOf<MediaCacheRecord>()
+
+        val selection = if (excludeFavourites) "$COL_META_IS_FAVOURITE = 0" else null
+        
+        db.query(
+            TABLE_METADATA, arrayOf(
+                COL_META_ID,
+                COL_META_STATE,
+                COL_META_CHUNKS,
+                COL_META_SIZE,
+                COL_LAST_ACCESSED
+            ),
+            selection,
+            null,
+            null,
+            null,
+            "$COL_LAST_ACCESSED ASC"
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val id = cursor.getString(cursor.getColumnIndexOrThrow(COL_META_ID))
+                val stateStr = cursor.getString(cursor.getColumnIndexOrThrow(COL_META_STATE))
+                val chunksBlob = cursor.getBlob(cursor.getColumnIndexOrThrow(COL_META_CHUNKS))
+                val sizeBytes = cursor.getLong(cursor.getColumnIndexOrThrow(COL_META_SIZE))
+                val lastAccessTime = cursor.getLong(cursor.getColumnIndexOrThrow(COL_LAST_ACCESSED))
+
+                val bitSet = if (chunksBlob == null) {
+                    BitSet(256)
+                } else {
+                    BitSet.valueOf(chunksBlob)
+                }
+
+                records.add(
+                    MediaCacheRecord(
+                        id = UUID.fromString(id),
+                        state = ContentState.valueOf(stateStr),
+                        chunks = bitSet,
+                        sizeBytes = sizeBytes,
+                        lastAccessTime = lastAccessTime
+                    )
+                )
+            }
+        }
+        return records
+    }
+
+    fun deleteTrackRecord(id: UUID) {
+        val db = writableDatabase
+        db.delete(TABLE_METADATA, "$COL_META_ID = ?", arrayOf(id.toString()))
+    }
 }
