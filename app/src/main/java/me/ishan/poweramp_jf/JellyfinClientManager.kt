@@ -504,6 +504,8 @@ class JellyfinClientManager(private val context: Context? = null) {
             }
             false
         } catch (e: Exception) {
+            // run this just in case it failed because parent dir was wiped out after "Clean Cache"
+            outputFile.parentFile?.mkdirs()
             Log.e(TAG, "Failed to get Album Art for $itemId", e)
             false
         }

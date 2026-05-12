@@ -8,8 +8,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 suspend fun AsynchronousFileChannel.readSuspend(
-    buffer: ByteBuffer,
-    position: Long
+    buffer: ByteBuffer, position: Long
 ): Int = suspendCancellableCoroutine { continuation ->
     read(buffer, position, continuation, object : CompletionHandler<Int, Any> {
         override fun completed(result: Int, attachment: Any) {
@@ -23,8 +22,7 @@ suspend fun AsynchronousFileChannel.readSuspend(
 }
 
 suspend fun AsynchronousFileChannel.writeSuspend(
-    buffer: ByteBuffer,
-    position: Long
+    buffer: ByteBuffer, position: Long
 ): Int = suspendCancellableCoroutine { continuation ->
     write(buffer, position, continuation, object : CompletionHandler<Int, Any> {
         override fun completed(result: Int, attachment: Any) {
@@ -39,10 +37,7 @@ suspend fun AsynchronousFileChannel.writeSuspend(
 
 
 suspend fun AsynchronousFileChannel.writeAt(
-    data: ByteArray,
-    fileOffset: Long,
-    bufferOffset: Int = 0,
-    length: Int = data.size - bufferOffset
+    data: ByteArray, fileOffset: Long, bufferOffset: Int = 0, length: Int = data.size - bufferOffset
 ): Int {
     val buffer = ByteBuffer.wrap(data, bufferOffset, length)
     var totalWritten = 0
@@ -58,10 +53,7 @@ suspend fun AsynchronousFileChannel.writeAt(
 }
 
 suspend fun AsynchronousFileChannel.readAt(
-    data: ByteArray,
-    fileOffset: Long,
-    bufferOffset: Int = 0,
-    length: Int = data.size - bufferOffset
+    data: ByteArray, fileOffset: Long, bufferOffset: Int = 0, length: Int = data.size - bufferOffset
 ): Int {
     val buffer = ByteBuffer.wrap(data, bufferOffset, length)
     var totalRead = 0

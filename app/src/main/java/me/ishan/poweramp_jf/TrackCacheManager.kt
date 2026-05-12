@@ -9,6 +9,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -28,11 +29,13 @@ class RefCountedAsyncFileChannel(
     private val file: File,
     private val mode: String = "rw",
     private val size: Long,
+    private val scope: CoroutineScope,
     private val onClosed: (() -> Unit)
 ) {
     private val lock = ReentrantReadWriteLock()
     private var refCount = 0
     private var channel: AsynchronousFileChannel? = null
+    private var closeJob: Job? = null
 
 
     companion object {
@@ -41,6 +44,9 @@ class RefCountedAsyncFileChannel(
 
     fun acquire(): AsynchronousFileChannel {
         return lock.write {
+            closeJob?.cancel()
+            closeJob = null
+
             if (channel == null) {
                 channel = AsynchronousFileChannel.open(
                     file.toPath(),
@@ -69,9 +75,18 @@ class RefCountedAsyncFileChannel(
             }
 
             if (refCount == 0 && channel != null) {
-                channel?.close()
-                channel = null
-                onClosed.invoke()
+                // Debounce closing to handle rapid open/close cycles from Poweramp
+                closeJob?.cancel()
+                closeJob = scope.launch {
+                    delay(2000) // 2-second grace period
+                    lock.write {
+                        if (refCount == 0 && channel != null) {
+                            channel?.close()
+                            channel = null
+                            onClosed.invoke()
+                        }
+                    }
+                }
             }
         }
     }
@@ -93,7 +108,7 @@ object TrackCacheManagerSingleton {
 class TrackCacheManager(
     context: Context, maxCacheSizeMB: Long = 2048
 ) {
-    private val tracksDir = File(context.dataDir, "jellyfin_tracks").apply { mkdirs() }
+    private val tracksDir = File(context.filesDir, "jellyfin_tracks").apply { mkdirs() }
     private val thumbDir = File(context.cacheDir, "jellyfin_thumbs").apply { mkdirs() }
     private val db = DatabaseManager.getInstance(context)
     private val trackBitSets = ConcurrentHashMap<UUID, BitSet>()
@@ -108,7 +123,7 @@ class TrackCacheManager(
     private fun getFileHandle(trackId: UUID, size: Long): RefCountedAsyncFileChannel {
         return fileChannels.computeIfAbsent(trackId) {
             RefCountedAsyncFileChannel(
-                File(tracksDir, "$trackId.cache"), "rw", size, onClosed = {
+                File(tracksDir, "$trackId.cache"), "rw", size, scope, onClosed = {
                     activeChunkDownloads.filterKeys { it.first == trackId }.forEach { (key, job) ->
                         job.cancel()
                         activeChunkDownloads.remove(key)
@@ -229,17 +244,11 @@ class TrackCacheManager(
         }
     }
 
-    /**
-     * Get cached thumbnail
-     */
     fun getCachedThumbnail(itemId: UUID): File? {
         val thumbFile = File(thumbDir, "$itemId.jpg")
         return thumbFile.takeIf { it.exists() }
     }
 
-    /**
-     * Download and cache thumbnail
-     */
     suspend fun downloadThumbnail(
         itemId: UUID, jellyfinClient: JellyfinClientManager, sizeHint: Point?
     ): File? = withContext(Dispatchers.IO) {
@@ -284,7 +293,7 @@ class TrackCacheManager(
             val file = File(tracksDir, "$trackId.cache")
             if (file.exists()) {
                 file.delete()
-                Log.d(TAG, "Deleted track file: $trackId")
+                Log.d(TAG, "Deleted track file: $file")
             }
         }
         db.deleteAllTracks(null, excludeFavourites)
@@ -319,22 +328,6 @@ class TrackCacheManager(
             get() = partialFilesSize + completeFilesSize + albumArtsSize + databaseSize
     }
 
-    fun getCacheSize(): Long {
-        var totalSize = 0L
-
-        // Calculate tracks cache
-        tracksDir.listFiles()?.forEach { file ->
-            totalSize += file.length()
-        }
-
-        // Calculate thumbnails cache
-        thumbDir.listFiles()?.forEach { file ->
-            totalSize += file.length()
-        }
-
-        return totalSize
-    }
-
     fun getCacheSizeBreakdown(context: Context): CacheSizeBreakdown {
         var partialSize = 0L
         var partialNum = 0
@@ -349,8 +342,8 @@ class TrackCacheManager(
         tracksDir.listFiles()?.forEach { file ->
             val trackId = try {
                 UUID.fromString(file.nameWithoutExtension)
-            } catch (e: Exception) {
-                null
+            } catch (_: Exception) {
+                return@forEach
             }
             if (trackId == null) {
                 return@forEach
@@ -361,7 +354,7 @@ class TrackCacheManager(
                 // For partial files: calculate actual usage from chunks bitset
                 val record = db.getMediaCacheRecord(trackId)
                 val size = if (record != null) {
-                    record.getChunks().cardinality().toLong() * MediaCacheRecord.CHUNK_SIZE
+                    record.getChunks().cardinality() * MediaCacheRecord.CHUNK_SIZE
                 } else {
                     0L
                 }
@@ -372,7 +365,7 @@ class TrackCacheManager(
 
                 partialSize += size
             } else {
-                completeNum += 1;
+                completeNum += 1
                 // For complete files: file.length() is accurate
                 val l = file.length()
                 completeSize += l

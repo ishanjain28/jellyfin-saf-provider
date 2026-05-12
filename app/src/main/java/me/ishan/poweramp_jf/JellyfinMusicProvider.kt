@@ -463,20 +463,26 @@ class JellyfinMusicProvider : DocumentsProvider() {
             }
         }
 
-        Log.i(
-            TAG, "openDocumentThumbnail document=$documentId album=$albumId sizeHint=$sizeHint"
-        )
 
         // Check thumbnail cache
         var thumbFile = cacheManager.getCachedThumbnail(albumId)
 
         if (thumbFile == null) {
+            Log.i(
+                TAG,
+                "openDocumentThumbnail document=$documentId album=$albumId sizeHint=$sizeHint downloading!"
+            )
+
             // Download thumbnail
             thumbFile = runBlocking {
                 cacheManager.downloadThumbnail(albumId, jellyfinClient, sizeHint)
             } ?: throw FileNotFoundException("Thumbnail not available")
+        } else {
+            Log.i(
+                TAG,
+                "openDocumentThumbnail document=$documentId album=$albumId sizeHint=$sizeHint served from cache"
+            )
         }
-
         return android.content.res.AssetFileDescriptor(
             ParcelFileDescriptor.open(thumbFile, ParcelFileDescriptor.MODE_READ_ONLY),
             0,

@@ -13,13 +13,9 @@ import androidx.core.database.sqlite.transaction
 import org.jellyfin.sdk.model.DateTime
 import java.time.LocalDateTime
 
-enum class MediaType {
-    ALBUM, TRACK
-}
-
 @Serializable
 enum class ContentState {
-    COMPLETE, DOWNLOADING, PARTIAL, FAILED
+    COMPLETE, DOWNLOADING, PARTIAL
 }
 
 data class MediaCacheRecord(
@@ -29,8 +25,8 @@ data class MediaCacheRecord(
     val sizeBytes: Long,
     val lastAccessTime: Long
 ) {
-    fun getFile(dataDir: File): File {
-        return File(dataDir, "$id.cache")
+    fun getFile(filesDir: File): File {
+        return File(filesDir, "$id.cache")
     }
 
     fun getChunks(): BitSet {
@@ -68,7 +64,6 @@ data class TrackMetadata(
 ) {
     companion object {
         const val MULTIVALUE_SEP = " // "
-        const val CHUNK_SIZE: Long = 2 * 1024 * 1024 // 2MiB
         const val STALE_LIMIT: Long = 2 * 24 * 60 * 60 * 1000 // 2 Days
     }
 
@@ -251,67 +246,78 @@ class MediaDatabaseHelper(context: Context?) :
     }
 
     fun getCachedMetadata(trackId: UUID): TrackMetadata? {
-        // TODO: update last accessed
-        val db = readableDatabase
-        return db.query(
-            TABLE_METADATA, arrayOf(
-                COL_META_ID,
-                COL_META_TITLE,
-                COL_META_ARTIST,
-                COL_META_ALBUM,
-                COL_META_ALBUM_ID,
-                COL_META_DURATION,
-                COL_META_SIZE,
-                COL_META_MIME,
-                COL_META_TRACK_NUM,
-                COL_META_DISC_NUM,
-                COL_META_ALBUM_ARTIST,
-                COL_META_DATE_MODIFIED,
-                COL_META_DATE_CREATED,
-                COL_META_IS_FAVOURITE,
-                COL_META_NUM_TRACKS,
-                COL_META_YEAR,
-                COL_META_GENRES,
-                COL_LAST_FETCHED,
-                COL_LAST_ACCESSED
-            ), "$COL_META_ID = ?", arrayOf(trackId.toString()), null, null, null
-        ).use { cursor ->
-            if (cursor.moveToFirst()) {
-                mapCursorToMetadata(cursor)
-            } else null
+        val db = writableDatabase
+        return db.transaction {
+            update(TABLE_METADATA, ContentValues().apply {
+                put(COL_LAST_ACCESSED, System.currentTimeMillis())
+            }, "$COL_META_ID = ?", arrayOf(trackId.toString()))
+
+            query(
+                TABLE_METADATA, arrayOf(
+                    COL_META_ID,
+                    COL_META_TITLE,
+                    COL_META_ARTIST,
+                    COL_META_ALBUM,
+                    COL_META_ALBUM_ID,
+                    COL_META_DURATION,
+                    COL_META_SIZE,
+                    COL_META_MIME,
+                    COL_META_TRACK_NUM,
+                    COL_META_DISC_NUM,
+                    COL_META_ALBUM_ARTIST,
+                    COL_META_DATE_MODIFIED,
+                    COL_META_DATE_CREATED,
+                    COL_META_IS_FAVOURITE,
+                    COL_META_NUM_TRACKS,
+                    COL_META_YEAR,
+                    COL_META_GENRES,
+                    COL_LAST_FETCHED,
+                    COL_LAST_ACCESSED
+                ), "$COL_META_ID = ?", arrayOf(trackId.toString()), null, null, null
+            ).use { cursor ->
+                if (cursor.moveToFirst()) {
+                    mapCursorToMetadata(cursor)
+                } else null
+            }
         }
     }
 
     fun getCachedLyrics(trackId: UUID): LyricsMetadata? {
-        // TODO: update last accessed
-        val db = readableDatabase
-        return db.query(
-            TABLE_METADATA,
-            arrayOf(COL_META_TRACK_LYRICS, COL_META_TRACK_LYRICS_SYNCED, COL_LAST_FETCHED),
-            "$COL_META_ID = ?",
-            arrayOf(trackId.toString()),
-            null,
-            null,
-            null
-        ).use { cursor ->
-            if (cursor.moveToFirst()) {
-                val lastFetched = cursor.getLong(cursor.getColumnIndexOrThrow(COL_LAST_FETCHED))
-                val lyrics = cursor.getString(cursor.getColumnIndexOrThrow(COL_META_TRACK_LYRICS))
-                val isSynced =
-                    (cursor.getInt(cursor.getColumnIndexOrThrow(COL_META_TRACK_LYRICS_SYNCED)) == 1)
+        val db = writableDatabase
+        return db.transaction {
+            update(TABLE_METADATA, ContentValues().apply {
+                put(COL_LAST_ACCESSED, System.currentTimeMillis())
+            }, "$COL_META_ID = ?", arrayOf(trackId.toString()))
 
-                if (lyrics == null) {
-                    return null
-                }
+            query(
+                TABLE_METADATA,
+                arrayOf(COL_META_TRACK_LYRICS, COL_META_TRACK_LYRICS_SYNCED, COL_LAST_FETCHED),
+                "$COL_META_ID = ?",
+                arrayOf(trackId.toString()),
+                null,
+                null,
+                null
+            ).use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val lastFetched = cursor.getLong(cursor.getColumnIndexOrThrow(COL_LAST_FETCHED))
+                    val lyrics =
+                        cursor.getString(cursor.getColumnIndexOrThrow(COL_META_TRACK_LYRICS))
+                    val isSynced =
+                        (cursor.getInt(cursor.getColumnIndexOrThrow(COL_META_TRACK_LYRICS_SYNCED)) == 1)
 
-                return LyricsMetadata(
-                    id = trackId,
-                    content = lyrics,
-                    isSynced = isSynced,
-                    lastAccessed = System.currentTimeMillis(),
-                    lastFetched = lastFetched,
-                )
-            } else null
+                    if (lyrics == null) {
+                        null
+                    } else {
+                        LyricsMetadata(
+                            id = trackId,
+                            content = lyrics,
+                            isSynced = isSynced,
+                            lastAccessed = System.currentTimeMillis(),
+                            lastFetched = lastFetched,
+                        )
+                    }
+                } else null
+            }
         }
     }
 
