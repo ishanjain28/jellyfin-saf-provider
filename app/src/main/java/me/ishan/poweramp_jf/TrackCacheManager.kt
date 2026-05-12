@@ -72,6 +72,7 @@ class RefCountedAsyncFileChannel(
         lock.write {
             if (refCount > 0) {
                 refCount--
+                Log.d("RefCountedAsyncChannel", "Released channel for $file. New refCount: $refCount")
             }
 
             if (refCount == 0 && channel != null) {
@@ -81,6 +82,7 @@ class RefCountedAsyncFileChannel(
                     delay(2000) // 2-second grace period
                     lock.write {
                         if (refCount == 0 && channel != null) {
+                            Log.i("RefCountedAsyncChannel", "Closing channel for $file after grace period")
                             channel?.close()
                             channel = null
                             onClosed.invoke()
@@ -186,6 +188,8 @@ class TrackCacheManager(
                     val chunkOffset = chunk.toLong() * MediaCacheRecord.CHUNK_SIZE
                     val chunkLength = minOf(MediaCacheRecord.CHUNK_SIZE, sizeBytes - chunkOffset)
 
+                    Log.d(TAG, "Starting chunk download: $trackId chunk=$chunk ($chunkLength bytes). Active downloads: ${activeChunkDownloads.size + 1}")
+
                     val success = jellyfinClient.downloadTrack(
                         trackId = trackId,
                         outputFile = getFileHandle(trackId, sizeBytes),
@@ -197,6 +201,7 @@ class TrackCacheManager(
                         })
 
                     if (success) {
+                        Log.d(TAG, "Chunk download success: $trackId chunk=$chunk")
                         synchronized(chunks) { chunks.set(chunk) }
                         chunkProgress.remove(key)
                         progressSignal.tryEmit(Unit)
@@ -204,13 +209,13 @@ class TrackCacheManager(
                         if (synchronized(chunks) { chunks.cardinality() } >= totalChunks) {
                             db.updateState(trackId, ContentState.COMPLETE)
                             Log.d(
-                                TAG, "jellyfin track=${entry.id} marked COMPLETE!"
+                                TAG, "jellyfin track=${trackId} marked COMPLETE!"
                             )
                         }
                     }
                 } catch (e: Exception) {
                     Log.w(
-                        TAG, "Chunk $size at $offset download ended for $trackId with ${e.message}"
+                        TAG, "Chunk $chunk download failed for $trackId: ${e.message}"
                     )
                 } finally {
                     activeChunkDownloads.remove(key)

@@ -421,6 +421,10 @@ class JellyfinMusicProvider : DocumentsProvider() {
                 override fun onRead(offset: Long, size: Int, data: ByteArray): Int {
                     if (offset >= documentId.sizeBytes) return 0
 
+                    val threadName = Thread.currentThread().name
+                    val startTime = System.currentTimeMillis()
+                    Log.v(TAG, "onRead start: ${documentId.trackId.toString().take(8)} offset=$offset size=$size on $threadName")
+
                     // Check if the required chunks are available to fulfill request.
                     // If not, start a download in the background 1MB chunks to fulfill request and
                     // return as soon as offset...offset+size is available
@@ -431,6 +435,13 @@ class JellyfinMusicProvider : DocumentsProvider() {
                     }
 
                     val read = runBlocking { channel.readAt(data, offset, 0, size) }
+
+                    val duration = System.currentTimeMillis() - startTime
+                    if (duration > 100) {
+                        Log.w(TAG, "onRead slow: ${documentId.trackId.toString().take(8)} took ${duration}ms")
+                    } else {
+                        Log.v(TAG, "onRead end: ${documentId.trackId.toString().take(8)} took ${duration}ms")
+                    }
 
                     return if (read < 0) 0 else read
                 }
