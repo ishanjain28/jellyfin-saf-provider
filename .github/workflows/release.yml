@@ -1,0 +1,54 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: # Allows manual triggering from the Actions tab
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Release APK
+        run: ./gradlew assembleRelease
+
+      - name: Rename and Move APK
+        id: rename_apk
+        run: |
+          # Extract version from tag (e.g., v1.0.0 -> 1.0.0)
+          VERSION=${GITHUB_REF#refs/tags/v}
+          if [[ "$VERSION" == "$GITHUB_REF" ]]; then VERSION="latest"; fi
+
+          ORIGINAL_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          NEW_NAME="jellyfin-provider-${VERSION}-unsigned.apk"
+
+          mv "$ORIGINAL_APK" "$NEW_NAME"
+          echo "APK_PATH=$NEW_NAME" >> $GITHUB_ENV
+          echo "Final APK name: $NEW_NAME"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: ${{ env.APK_PATH }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
