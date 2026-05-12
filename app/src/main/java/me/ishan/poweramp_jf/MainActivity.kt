@@ -258,8 +258,8 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
         Button(
             onClick = {
                 scope.launch(Dispatchers.IO) {
-                    val dbHelper = MediaDatabaseHelper(context)
-                    dbHelper.resetDatabase()
+                    val db = DatabaseManager.getInstance(context)
+                    db.resetDatabase()
                     withContext(Dispatchers.Main) {
                         Toast.makeText(context, "Database Reset Successfully", Toast.LENGTH_SHORT).show()
                     }

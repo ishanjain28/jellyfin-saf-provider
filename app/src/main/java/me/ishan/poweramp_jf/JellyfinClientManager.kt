@@ -8,7 +8,9 @@ import android.os.Build
 import android.util.Log
 import androidx.core.content.edit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jellyfin.sdk.Jellyfin
@@ -36,13 +38,18 @@ import java.util.concurrent.TimeUnit
 class JellyfinClientManager(private val context: Context? = null) {
     private val cryptoManager = CryptoManager()
 
-    private val httpClient = OkHttpClient.Builder().connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS).build()
+    private val httpClient = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS).writeTimeout(15, TimeUnit.SECONDS)
+        .callTimeout(60, TimeUnit.SECONDS).connectionPool(
+            ConnectionPool(
+                maxIdleConnections = 5, keepAliveDuration = 5, TimeUnit.MINUTES
+            )
+        ).retryOnConnectionFailure(true).build()
 
     private val prefs: SharedPreferences? =
         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    private val db = MediaDatabaseHelper(context)
+    private val db = DatabaseManager.getInstance(context)
     private var jellyfin: Jellyfin? = null
     private var api: ApiClient? = null
     private var currentUserId: UUID? = null
@@ -387,7 +394,16 @@ class JellyfinClientManager(private val context: Context? = null) {
                 requestBuilder.header("Range", "bytes=$byteOffset-${byteOffset + byteLength - 1}")
             }
 
-            httpClient.newCall(requestBuilder.build()).execute().use { response ->
+            val call = httpClient.newCall(requestBuilder.build())
+
+            // Cancel okhttp download on coroutine cancellation
+            coroutineContext[Job]?.invokeOnCompletion { cause ->
+                if (cause != null) {
+                    call.cancel()
+                }
+            }
+
+            call.execute().use { response ->
                 if (!response.isSuccessful && response.code != 206) {
                     Log.e(TAG, "Download failed with code: ${response.code}")
                     return@withContext false
@@ -413,7 +429,7 @@ class JellyfinClientManager(private val context: Context? = null) {
             )
             false
         } catch (e: Exception) {
-            Log.e(TAG, "Download error for track $trackId", e)
+            Log.w(TAG, "Download ended for track $trackId: ${e.message}")
             false
         } finally {
             outputFile.release()

@@ -35,11 +35,13 @@ class RefCountedAsyncFileChannel(
     private var refCount = 0
     private var channel: AsynchronousFileChannel? = null
 
+
     companion object {
         private const val TAG = "RefCountedAsyncFileChannel"
     }
 
     fun acquire(): AsynchronousFileChannel {
+
         return lock.write {
             if (channel == null) {
                 channel = AsynchronousFileChannel.open(
@@ -77,13 +79,12 @@ class RefCountedAsyncFileChannel(
     }
 }
 
-
 class TrackCacheManager(
     context: Context, maxCacheSizeMB: Long = 2048
 ) {
     private val cacheDir = File(context.cacheDir, "jellyfin_tracks").apply { mkdirs() }
     private val thumbDir = File(context.cacheDir, "jellyfin_thumbs").apply { mkdirs() }
-    private val db = MediaDatabaseHelper(context)
+    private val db = DatabaseManager.getInstance(context)
     private val trackBitSets = ConcurrentHashMap<UUID, BitSet>()
     private val activeChunkDownloads = ConcurrentHashMap<Pair<UUID, Int>, Job>()
     private val fileChannels = ConcurrentHashMap<UUID, RefCountedAsyncFileChannel>()
@@ -95,10 +96,16 @@ class TrackCacheManager(
 
     private fun getFileHandle(trackId: UUID, size: Long): RefCountedAsyncFileChannel {
         return fileChannels.computeIfAbsent(trackId) {
-            RefCountedAsyncFileChannel(File(cacheDir, "$trackId.cache"), "rw", size, onClosed = {
-                fileChannels.remove(trackId)
-                trackBitSets.remove(trackId)
-            })
+            RefCountedAsyncFileChannel(
+                File(cacheDir, "$trackId.cache"), "rw", size, onClosed = {
+                    activeChunkDownloads.filterKeys { it.first == trackId }.forEach { (key, job) ->
+                            job.cancel()
+                            activeChunkDownloads.remove(key)
+                            chunkProgress.remove(key)
+                        }
+                    fileChannels.remove(trackId)
+                    trackBitSets.remove(trackId)
+                })
         }
     }
 
@@ -149,44 +156,43 @@ class TrackCacheManager(
                 continue
             }
 
-            activeChunkDownloads.getOrPut(key) {
-                scope.launch {
-                    try {
-                        val chunkOffset = chunk.toLong() * MediaCacheRecord.CHUNK_SIZE
-                        val chunkLength =
-                            minOf(MediaCacheRecord.CHUNK_SIZE, sizeBytes - chunkOffset)
+            activeChunkDownloads[key] = scope.launch {
+                try {
+                    val chunkOffset = chunk.toLong() * MediaCacheRecord.CHUNK_SIZE
+                    val chunkLength = minOf(MediaCacheRecord.CHUNK_SIZE, sizeBytes - chunkOffset)
 
-                        val success = jellyfinClient.downloadTrack(
-                            trackId = trackId,
-                            outputFile = getFileHandle(trackId, sizeBytes),
-                            byteOffset = chunkOffset,
-                            byteLength = chunkLength,
-                            onProgress = { absoluteProgress ->
-                                chunkProgress[key] = absoluteProgress
-                                progressSignal.tryEmit(Unit)
-                            })
-
-                        if (success) {
-                            synchronized(chunks) { chunks.set(chunk) }
-                            chunkProgress.remove(key)
+                    val success = jellyfinClient.downloadTrack(
+                        trackId = trackId,
+                        outputFile = getFileHandle(trackId, sizeBytes),
+                        byteOffset = chunkOffset,
+                        byteLength = chunkLength,
+                        onProgress = { absoluteProgress ->
+                            chunkProgress[key] = absoluteProgress
                             progressSignal.tryEmit(Unit)
+                        })
 
-                            if (synchronized(chunks) { chunks.cardinality() } >= totalChunks) {
-                                db.updateState(trackId, ContentState.COMPLETE)
-                                Log.d(
-                                    TAG, "jellyfin track=${entry.id} marked COMPLETE!"
-                                )
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Chunk download error for $trackId", e)
-                    } finally {
-                        activeChunkDownloads.remove(key)
+                    if (success) {
+                        synchronized(chunks) { chunks.set(chunk) }
                         chunkProgress.remove(key)
-                        db.updateChunks(
-                            trackId, synchronized(chunks) { chunks })
                         progressSignal.tryEmit(Unit)
+
+                        if (synchronized(chunks) { chunks.cardinality() } >= totalChunks) {
+                            db.updateState(trackId, ContentState.COMPLETE)
+                            Log.d(
+                                TAG, "jellyfin track=${entry.id} marked COMPLETE!"
+                            )
+                        }
                     }
+                } catch (e: Exception) {
+                    Log.w(
+                        TAG, "Chunk $size at $offset download ended for $trackId with ${e.message}"
+                    )
+                } finally {
+                    activeChunkDownloads.remove(key)?.cancel()
+                    chunkProgress.remove(key)
+                    db.updateChunks(
+                        trackId, synchronized(chunks) { chunks })
+                    progressSignal.tryEmit(Unit)
                 }
             }
         }

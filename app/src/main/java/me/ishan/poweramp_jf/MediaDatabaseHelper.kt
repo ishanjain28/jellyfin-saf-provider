@@ -94,6 +94,18 @@ data class LyricsMetadata(
     }
 }
 
+object DatabaseManager {
+    private var INSTANCE: MediaDatabaseHelper? = null
+
+    fun getInstance(context: Context?): MediaDatabaseHelper {
+        return INSTANCE ?: synchronized(this) {
+            INSTANCE ?: MediaDatabaseHelper(context?.applicationContext).also {
+                INSTANCE = it
+            }
+        }
+    }
+}
+
 class MediaDatabaseHelper(context: Context?) :
     SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
 

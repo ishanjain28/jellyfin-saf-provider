@@ -85,7 +85,7 @@ class JellyfinMusicProvider : DocumentsProvider() {
             handlerThread = HandlerThread("JellyfinSAFProxyThread")
             handlerThread.start()
 
-            db = MediaDatabaseHelper(ctx)
+            db = DatabaseManager.getInstance(ctx)
 
             Log.i(TAG, "JellyfinMusicProvider initialized with server: ${jellyfinClient.getUrl()}")
 
@@ -381,6 +381,8 @@ class JellyfinMusicProvider : DocumentsProvider() {
             throw IOException("openDocument is not supported for any type except Tracks! type=$documentId")
         }
 
+        signal?.throwIfCanceled()
+
         // 1. Check if fully cached
         val cachedFile = cacheManager.getCachedFile(documentId.trackId)
         if (cachedFile != null) {
@@ -398,6 +400,15 @@ class JellyfinMusicProvider : DocumentsProvider() {
         Log.d(TAG, "jellyfin openViaProxyFd ${documentId.trackId} from ${documentId.albumId}")
 
         val storageManager = context?.getSystemService(Context.STORAGE_SERVICE) as StorageManager
+
+        synchronized(this) {
+            if (!handlerThread.isAlive) {
+                handlerThread = HandlerThread("JellyfinSAFProxyThread")
+                handlerThread.start()
+                Log.d(TAG, "HandlerThread recreated after shutdown")
+            }
+        }
+
         val handler = Handler(handlerThread.looper)
         val cacheFile = cacheManager.openFileForStreaming(documentId.trackId, documentId.sizeBytes)
             ?: throw FileNotFoundException(
@@ -440,14 +451,18 @@ class JellyfinMusicProvider : DocumentsProvider() {
     override fun openDocumentThumbnail(
         documentId: String, sizeHint: Point?, signal: CancellationSignal?
     ): android.content.res.AssetFileDescriptor {
-        val docId = DocumentId.parse(documentId)
+        val albumId = when (val docId = DocumentId.parse(documentId)) {
+            is DocumentId.Type.Album -> {
+                docId.albumId
+            }
 
-        val albumId = if (docId is DocumentId.Type.Album) {
-            docId.albumId
-        } else if (docId is DocumentId.Type.Track) {
-            docId.albumId
-        } else {
-            throw IOException("openDocumentThumbnail is only supported for albums & tracks. Got $docId")
+            is DocumentId.Type.Track -> {
+                docId.albumId
+            }
+
+            else -> {
+                throw IOException("openDocumentThumbnail is only supported for albums & tracks. Got $docId")
+            }
         }
 
         Log.i(
