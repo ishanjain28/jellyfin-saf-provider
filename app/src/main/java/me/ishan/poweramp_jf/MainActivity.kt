@@ -71,14 +71,8 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
     var username by remember { mutableStateOf(manager.getUsername()) }
     var password by remember { mutableStateOf(manager.getPassword()) }
     var maxCacheSize by remember { mutableStateOf(manager.getMaxCacheSize().toString()) }
-    var cachedSizeMB by remember { mutableStateOf(cacheManager.getStats().usedMB) }
     var isLoading by remember { mutableStateOf(false) }
     var isAuthenticated by remember { mutableStateOf(manager.isAuthenticated()) }
-
-    // Refresh cache size when entering the screen
-    LaunchedEffect(Unit) {
-        cachedSizeMB = cacheManager.getStats().usedMB
-    }
 
     Column(
         modifier = modifier
@@ -96,8 +90,7 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
 
         if (isAuthenticated) {
             Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
+                modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer
                 )
             ) {
@@ -129,9 +122,7 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
                 onClick = {
                     manager.logout()
                     isAuthenticated = false
-                },
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(
+                }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.error
                 )
             ) {
@@ -220,9 +211,7 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
                             Toast.LENGTH_SHORT
                         ).show()
                     }
-                },
-                enabled = !isLoading && url.isNotBlank(),
-                modifier = Modifier.fillMaxWidth()
+                }, enabled = !isLoading && url.isNotBlank(), modifier = Modifier.fillMaxWidth()
             ) {
                 Text("Test Connection")
             }
@@ -254,8 +243,9 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
+        // TODO
         Text(
-            text = "Currently cached: $cachedSizeMB MB",
+            text = "Currently cached: MB",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.Start)
@@ -265,8 +255,7 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
 
         Button(
             onClick = {
-                cacheManager.clearCache()
-                cachedSizeMB = 0
+                // TODO
                 Toast.makeText(context, "Cache Cleared", Toast.LENGTH_SHORT).show()
             },
             modifier = Modifier.fillMaxWidth(),

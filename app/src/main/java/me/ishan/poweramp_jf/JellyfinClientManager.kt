@@ -1,7 +1,10 @@
 package me.ishan.poweramp_jf
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
+import android.graphics.Point
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -13,10 +16,12 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jellyfin.sdk.Jellyfin
 import org.jellyfin.sdk.api.client.ApiClient
+import org.jellyfin.sdk.api.client.exception.InvalidStatusException
 import org.jellyfin.sdk.api.client.extensions.audioApi
 import org.jellyfin.sdk.api.client.extensions.authenticateUserByName
 import org.jellyfin.sdk.api.client.extensions.imageApi
 import org.jellyfin.sdk.api.client.extensions.itemsApi
+import org.jellyfin.sdk.api.client.extensions.lyricsApi
 import org.jellyfin.sdk.api.client.extensions.systemApi
 import org.jellyfin.sdk.api.client.extensions.userApi
 import org.jellyfin.sdk.api.client.extensions.userLibraryApi
@@ -29,9 +34,7 @@ import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.ImageType
 import org.jellyfin.sdk.model.api.ItemFields
-import org.jellyfin.sdk.model.api.ItemSortBy
 import java.io.File
-import java.io.InputStream
 import java.security.KeyStore
 import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
@@ -71,7 +74,7 @@ class JellyfinClientManager(private val context: Context? = null) {
                     name = "Android Jellyfin Provider", version = "0.0.1"
                 )
                 deviceInfo = DeviceInfo(
-                    id = getDeviceId(), name = android.os.Build.MODEL
+                    id = getDeviceId(), name = Build.MODEL
                 )
             }
         }
@@ -194,6 +197,8 @@ class JellyfinClientManager(private val context: Context? = null) {
             persistCredentials()
 
             Log.d(TAG, "Login successful: userId=$currentUserId")
+
+            // TODO: notify documents provider
             true
 
         } catch (e: Exception) {
@@ -264,38 +269,6 @@ class JellyfinClientManager(private val context: Context? = null) {
     }
 
     /**
-     * Get audio items from library
-     */
-    suspend fun getAudioItems(
-        parentId: UUID? = null, recursive: Boolean = true, limit: Int? = null
-    ): List<BaseItemDto> = withContext(Dispatchers.IO) {
-        val apiClient = getApiClient() ?: return@withContext emptyList()
-        val userId = currentUserId ?: return@withContext emptyList()
-
-        try {
-            val result = apiClient.itemsApi.getItems(
-                userId = userId,
-                parentId = parentId,
-                includeItemTypes = setOf(BaseItemKind.AUDIO),
-                recursive = recursive,
-                fields = setOf(
-                    ItemFields.MEDIA_SOURCES,
-                    ItemFields.PRIMARY_IMAGE_ASPECT_RATIO,
-                    ItemFields.OVERVIEW,
-                    ItemFields.GENRES,
-                    ItemFields.TAGS
-                ),
-                limit = limit
-            )
-
-            result.content.items
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to get audio items", e)
-            emptyList()
-        }
-    }
-
-    /**
      * Get albums from library
      */
     suspend fun getAlbums(
@@ -311,15 +284,14 @@ class JellyfinClientManager(private val context: Context? = null) {
                 recursive = true,
                 limit = limit,
                 startIndex = startIndex,
-                sortBy = setOf(ItemSortBy.SORT_NAME),
-                fields = setOf(
-                    ItemFields.PRIMARY_IMAGE_ASPECT_RATIO, ItemFields.GENRES, ItemFields.OVERVIEW
-                )
+                fields = setOf(ItemFields.GENRES)
             )
 
             result.content.items
+        } catch (e: InvalidStatusException) {
+            Log.w(TAG, "getAlbums limit=$limit startIndex=$startIndex received ${e.status} code")
+            emptyList()
         } catch (e: Exception) {
-
             Log.e(TAG, "Failed to get albums", e)
             emptyList()
         }
@@ -337,14 +309,16 @@ class JellyfinClientManager(private val context: Context? = null) {
                 userId = userId,
                 parentId = albumId,
                 includeItemTypes = setOf(BaseItemKind.AUDIO),
-                sortBy = setOf(ItemSortBy.SORT_NAME),
-                limit = 1000,
+                limit = 100,
                 fields = setOf(
                     ItemFields.MEDIA_SOURCES, ItemFields.GENRES
                 )
             )
 
             result.content.items
+        } catch (e: InvalidStatusException) {
+            Log.w(TAG, "getAlbumTracks $albumId received ${e.status} code")
+            emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get album tracks", e)
             emptyList()
@@ -359,11 +333,13 @@ class JellyfinClientManager(private val context: Context? = null) {
         val userId = currentUserId ?: return@withContext null
 
         try {
-
             val result = apiClient.userLibraryApi.getItem(
                 userId = userId, itemId = itemId
             )
             result.content
+        } catch (e: InvalidStatusException) {
+            Log.w(TAG, "getItem item=$itemId received ${e.status} code")
+            null
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get item", e)
             null
@@ -375,21 +351,25 @@ class JellyfinClientManager(private val context: Context? = null) {
      */
     suspend fun getTrackMetadata(trackId: UUID): TrackMetadata? = withContext(Dispatchers.IO) {
         val item = getItem(trackId) ?: return@withContext null
-        val container = item.mediaSources?.firstOrNull()?.container
 
         TrackMetadata(
             id = trackId,
             title = item.name.orEmpty(),
-            artist = item.albumArtist ?: item.artists?.firstOrNull() ?: "Unknown",
-            album = item.album ?: "Unknown",
+            artists = item.artists ?: emptyList(),
             albumId = item.albumId,
+            album = item.album ?: "Unknown Album",
             year = item.productionYear,
             durationMs = item.runTimeTicks?.div(10000) ?: 0L,
             sizeBytes = item.mediaSources?.firstOrNull()?.size ?: 0L,
-            genres = item.genres?.joinToString(", ") ?: "",
+            genres = item.genres ?: emptyList<String>(),
             trackNumber = item.indexNumber,
+            numTracks = item.indexNumberEnd,
+            discNumber = item.parentIndexNumber,
             dateModifiedMs = item.dateCreated,
-            mimeType = "audio/${container ?: "mpeg"}"
+            mimeType = "audio/${item.mediaSources?.firstOrNull()?.container ?: "mpeg"}",
+            albumArtist = item.albumArtist ?: "",
+            dateCreated = item.dateCreated,
+            isFavourite = item.userData?.isFavorite ?: false,
         )
     }
 
@@ -399,20 +379,18 @@ class JellyfinClientManager(private val context: Context? = null) {
     suspend fun downloadTrack(
         trackId: UUID,
         outputFile: RefCountedAsyncFileChannel,
-        offset: Long = 0L,
-        length: Long = -1L,
+        byteOffset: Long = 0L,
+        byteLength: Long = -1L,
         onProgress: ((Long) -> Unit)? = null
     ): Boolean = withContext(Dispatchers.IO) {
-        val url = if (length > 0) getStreamUrl(trackId, 0L) else getStreamUrl(trackId, offset)
-        if (url == null) return@withContext false
+        val url = getStreamUrl(trackId) ?: return@withContext false
         val token = accessToken ?: return@withContext false
         val channel = outputFile.acquire()
 
         try {
             val requestBuilder = Request.Builder().url(url).header("X-Emby-Token", token)
-
-            if (length > 0) {
-                requestBuilder.header("Range", "bytes=$offset-${offset + length - 1}")
+            if (byteLength > 0) {
+                requestBuilder.header("Range", "bytes=$byteOffset-${byteOffset + byteLength - 1}")
             }
 
             httpClient.newCall(requestBuilder.build()).execute().use { response ->
@@ -421,20 +399,25 @@ class JellyfinClientManager(private val context: Context? = null) {
                     return@withContext false
                 }
 
-
                 val body = response.body
                 val input = body.byteStream()
-                val buffer = ByteArray(8192)
+                val buffer = ByteArray(32 * 1024)
                 var bytesRead: Int
                 var totalDownloaded = 0L
 
                 while (input.read(buffer).also { bytesRead = it } != -1) {
-                    channel.writeAt(buffer, offset + totalDownloaded, 0, bytesRead)
+                    channel.writeAt(buffer, byteOffset + totalDownloaded, 0, bytesRead)
                     totalDownloaded += bytesRead
-                    onProgress?.invoke(offset + totalDownloaded)
+                    onProgress?.invoke(byteOffset + totalDownloaded)
                 }
             }
             true
+        } catch (e: InvalidStatusException) {
+            Log.w(
+                TAG,
+                "downloadTrack track=$trackId offset=$byteOffset length=$byteLength received ${e.status} code"
+            )
+            false
         } catch (e: Exception) {
             Log.e(TAG, "Download error for track $trackId", e)
             false
@@ -446,7 +429,7 @@ class JellyfinClientManager(private val context: Context? = null) {
     /**
      * Get track stream URL using SDK's URL builder
      */
-    fun getStreamUrl(trackId: UUID, offset: Long = 0L): String? {
+    fun getStreamUrl(trackId: UUID): String? {
         val apiClient = getApiClient() ?: return null
 
         // Use SDK's URL construction with static=true
@@ -454,7 +437,6 @@ class JellyfinClientManager(private val context: Context? = null) {
             itemId = trackId,
             static = true,
             deviceId = getDeviceId(),
-            startTimeTicks = offset * 10000
         )
     }
 
@@ -462,69 +444,72 @@ class JellyfinClientManager(private val context: Context? = null) {
      * Download album art using SDK's image API
      */
     suspend fun downloadAlbumArt(
-        itemId: UUID, outputFile: File, maxWidth: Int = 1000, maxHeight: Int = 1000
+        itemId: UUID, outputFile: File, sizeHint: Point?,
     ): Boolean = withContext(Dispatchers.IO) {
         val apiClient = getApiClient() ?: return@withContext false
 
+        // Use SDK's image API
         try {
-            // Use SDK's image API
             val response = apiClient.imageApi.getItemImage(
                 itemId = itemId,
                 imageType = ImageType.PRIMARY,
-                maxWidth = maxWidth,
-                maxHeight = maxHeight,
+                maxWidth = sizeHint?.x ?: 1000,
+                maxHeight = sizeHint?.y ?: 1000,
                 quality = 90
             )
-            outputFile.writeBytes(response.content)
 
+            outputFile.writeBytes(response.content)
             true
+        } catch (e: InvalidStatusException) {
+            Log.w(TAG, "downloadAlbumArt item=$itemId sizeHint=$sizeHint received ${e.status} code")
+            false
         } catch (e: Exception) {
-            Log.e(TAG, "Album art download error for item $itemId", e)
+            Log.e(TAG, "Failed to get Album Art for $itemId", e)
             false
         }
     }
 
+
     /**
-     * Get album art URL using SDK
+     * Download lyrics using SDK's lyrics API and format as LRC if synced
      */
-    fun getAlbumArtUrl(
-        itemId: UUID, maxWidth: Int = 512, maxHeight: Int = 512
-    ): String? {
+    @SuppressLint("DefaultLocale")
+    suspend fun getLyrics(trackId: UUID): LyricsResult? {
         val apiClient = getApiClient() ?: return null
 
-        // Use SDK's URL construction
-        return apiClient.imageApi.getItemImageUrl(
-            itemId = itemId,
-            imageType = ImageType.PRIMARY,
-            maxWidth = maxWidth,
-            maxHeight = maxHeight,
-            quality = 90
-        )
-    }
+        return try {
+            val response = apiClient.lyricsApi.getLyrics(trackId)
+            val lyricDto = response.content
 
-    /**
-     * Get album art as InputStream using SDK
-     */
-    suspend fun getAlbumArtStream(
-        itemId: UUID, maxSize: Int = 512
-    ): InputStream? = withContext(Dispatchers.IO) {
-        val apiClient = getApiClient() ?: return@withContext null
+            val isSynced = lyricDto.metadata.isSynced ?: (lyricDto.lyrics.any { it.start != null })
 
-        try {
-            val response = apiClient.imageApi.getItemImage(
-                itemId = itemId,
-                imageType = ImageType.PRIMARY,
-                maxWidth = maxSize,
-                maxHeight = maxSize,
-                quality = 90
-            )
-
-            response.content.inputStream()
+            val sb = StringBuilder()
+            lyricDto.lyrics.forEach { line ->
+                if (line.start != null) {
+                    val ticks = line.start!!
+                    val totalMilliseconds = ticks / 10_000
+                    val minutes = totalMilliseconds / 60_000
+                    val seconds = (totalMilliseconds % 60_000) / 1000
+                    val hundredths = (totalMilliseconds % 1000) / 10
+                    sb.append(
+                        String.format(
+                            "[%02d:%02d.%02d]%s\n", minutes, seconds, hundredths, line.text
+                        )
+                    )
+                } else {
+                    sb.append(line.text).append("\n")
+                }
+            }
+            LyricsResult(sb.toString(), isSynced)
+        } catch (e: InvalidStatusException) {
+            Log.w(TAG, "getLyrics track=$trackId received ${e.status} code")
+            null
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to get album art stream", e)
+            Log.e(TAG, "Failed to get lyrics for $trackId", e)
             null
         }
     }
+
 
 //    /**
 //     * Report playback start using SDK
@@ -664,17 +649,24 @@ class CryptoManager {
     }
 }
 
+data class LyricsResult(val content: String, val isSynced: Boolean)
+
 data class TrackMetadata(
     val id: UUID,
     val title: String,
-    val artist: String,
+    val artists: List<String>,
     val album: String,
     val albumId: UUID?,
     val year: Int?,
     val durationMs: Long,
     val sizeBytes: Long,
-    val genres: String,
     val trackNumber: Int?,
+    val numTracks: Int?,
+    val discNumber: Int?,
     val dateModifiedMs: DateTime?,
-    val mimeType: String
+    val mimeType: String,
+    val genres: List<String>,
+    val albumArtist: String,
+    val dateCreated: DateTime?,
+    val isFavourite: Boolean,
 )

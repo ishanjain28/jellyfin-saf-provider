@@ -14,13 +14,12 @@ import android.provider.DocumentsContract
 import android.provider.DocumentsProvider
 import android.provider.MediaStore
 import android.util.Log
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import me.ishan.poweramp_jf.DocumentId.ROOT_ID
 import org.jellyfin.sdk.model.UUID
 import java.io.FileNotFoundException
+import java.io.IOException
 
 
 // TODO: Add FLAG_SUPPORTS_METADATA
@@ -28,12 +27,10 @@ class JellyfinMusicProvider : DocumentsProvider() {
 
     private lateinit var jellyfinClient: JellyfinClientManager
     private lateinit var cacheManager: TrackCacheManager
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private lateinit var handlerThread: HandlerThread
 
     companion object {
         private const val TAG = "JellyfinMusicProvider"
-
-        private const val ROOT_ID = "jellyfin_root"
 
         private val DEFAULT_ROOT_PROJECTION = arrayOf(
             DocumentsContract.Root.COLUMN_ROOT_ID,
@@ -41,7 +38,6 @@ class JellyfinMusicProvider : DocumentsProvider() {
             DocumentsContract.Root.COLUMN_FLAGS,
             DocumentsContract.Root.COLUMN_ICON,
             DocumentsContract.Root.COLUMN_TITLE,
-            DocumentsContract.Root.COLUMN_SUMMARY,
             DocumentsContract.Root.COLUMN_DOCUMENT_ID
         )
 
@@ -52,6 +48,7 @@ class JellyfinMusicProvider : DocumentsProvider() {
             DocumentsContract.Document.COLUMN_LAST_MODIFIED,
             DocumentsContract.Document.COLUMN_FLAGS,
             DocumentsContract.Document.COLUMN_SIZE,
+            DocumentsContract.Document.COLUMN_SUMMARY,
 
             // Poweramp metadata
             MediaStore.Audio.Media.TITLE,
@@ -62,9 +59,16 @@ class JellyfinMusicProvider : DocumentsProvider() {
             MediaStore.Audio.Media.TRACK,
             MediaStore.Audio.Media.IS_MUSIC,
 
+            // Lyrics
+            "lyrics",
+            "lyrics_synced",
+
             // Poweramp flags
             "com.maxmpz.poweramp.provider.COLUMN_FLAGS"
         )
+
+        private const val COLUMN_TRACK_LYRICS = "lyrics"
+        private const val COLUMN_TRACK_LYRICS_SYNCED = "lyrics_synced"
     }
 
     override fun onCreate(): Boolean {
@@ -76,6 +80,9 @@ class JellyfinMusicProvider : DocumentsProvider() {
             cacheManager = TrackCacheManager(
                 context = ctx, maxCacheSizeMB = jellyfinClient.getMaxCacheSize()
             )
+
+            handlerThread = HandlerThread("JellyfinSAFProxyThread")
+            handlerThread.start()
 
             Log.i(TAG, "JellyfinMusicProvider initialized with server: ${jellyfinClient.getUrl()}")
 
@@ -94,69 +101,67 @@ class JellyfinMusicProvider : DocumentsProvider() {
                 DocumentsContract.Root.COLUMN_FLAGS, DocumentsContract.Root.FLAG_SUPPORTS_IS_CHILD
             )
             add(DocumentsContract.Root.COLUMN_TITLE, "Jellyfin Music")
-            add(
-                DocumentsContract.Root.COLUMN_SUMMARY, "${cacheManager.getStats().usedMB}MB cached"
-            )
             add(DocumentsContract.Root.COLUMN_DOCUMENT_ID, ROOT_ID)
         }
 
         return result
     }
 
-    override fun queryDocument(documentId: String, projection: Array<out String>?): MatrixCursor {
+    override fun queryDocument(docId: String, projection: Array<out String>?): MatrixCursor {
+        val documentId = DocumentId.parse(docId)
+        Log.i(TAG, "queryDocument $documentId")
         val result = MatrixCursor(projection ?: DEFAULT_DOCUMENT_PROJECTION)
 
-        if (documentId == ROOT_ID) {
-            // Root folder
-            result.newRow().apply {
-                add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, ROOT_ID)
-                add(
-                    DocumentsContract.Document.COLUMN_MIME_TYPE,
-                    DocumentsContract.Document.MIME_TYPE_DIR
-                )
-                add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, "Jellyfin Music")
-                add(
-                    DocumentsContract.Document.COLUMN_FLAGS,
-                    DocumentsContract.Document.FLAG_DIR_PREFERS_GRID
-                )
-            }
-        } else if (documentId.startsWith("album:")) {
-            // Album folder
-            val albumId = documentId.removePrefix("album:")
-            runBlocking {
-                try {
-                    val tracks = jellyfinClient.getAlbumTracks(UUID.fromString(albumId))
-                    if (tracks.isNotEmpty()) {
-                        val album = tracks.first()
-                        result.newRow().apply {
-                            add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, documentId)
-                            add(
-                                DocumentsContract.Document.COLUMN_MIME_TYPE,
-                                DocumentsContract.Document.MIME_TYPE_DIR
-                            )
-                            add(
-                                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                                album.album ?: "Unknown Album"
-                            )
-                            add(
-                                DocumentsContract.Document.COLUMN_FLAGS,
-                                DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE or DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL
-                            )
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error querying album", e)
+        when (documentId) {
+            is DocumentId.Type.Root -> {
+                // Root folder
+                result.newRow().apply {
+                    add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, ROOT_ID)
+                    add(
+                        DocumentsContract.Document.COLUMN_MIME_TYPE,
+                        DocumentsContract.Document.MIME_TYPE_DIR
+                    )
+                    add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, "Jellyfin Music")
+                    add(
+                        DocumentsContract.Document.COLUMN_FLAGS,
+                        DocumentsContract.Document.FLAG_DIR_PREFERS_GRID
+                    )
                 }
             }
-        } else {
-            // Individual track
-            runBlocking withContext@{
+
+            is DocumentId.Type.Album -> {
+                throw IOException("queryDocument called on type album? $documentId")
+            }
+
+            is DocumentId.Type.Track -> {
                 try {
-                    val metadata = jellyfinClient.getTrackMetadata(UUID.fromString(documentId))
-                        ?: return@withContext result
+                    val (meta, lyrics) = runBlocking {
+                        var p1 = async { jellyfinClient.getTrackMetadata(documentId.trackId) }
+
+                        // Fetch lyrics if requested
+                        var p2 = if (projection != null && (projection.contains(
+                                COLUMN_TRACK_LYRICS
+                            ) || projection.contains(
+                                COLUMN_TRACK_LYRICS_SYNCED
+                            ))
+                        ) {
+                            async { jellyfinClient.getLyrics(documentId.trackId) }
+                        } else {
+                            async { null }
+                        }
+
+                        p1.await() to p2.await()
+                    }
+                    val metadata = meta ?: return result
 
                     result.newRow().apply {
-                        add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, documentId)
+                        add(
+                            DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentId.forTrack(
+                                metadata.albumId ?: UUID.randomUUID(),
+                                metadata.id,
+                                metadata.sizeBytes
+                            )
+                        )
                         add(DocumentsContract.Document.COLUMN_MIME_TYPE, metadata.mimeType)
                         add(
                             DocumentsContract.Document.COLUMN_DISPLAY_NAME, metadata.title
@@ -167,17 +172,38 @@ class JellyfinMusicProvider : DocumentsProvider() {
                         )
                         add(
                             DocumentsContract.Document.COLUMN_FLAGS,
-                            DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL or DocumentsContract.Document.FLAG_SUPPORTS_DELETE
+                            DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL
                         )
 
                         // Poweramp metadata
                         add(MediaStore.Audio.Media.TITLE, metadata.title)
-                        add(MediaStore.Audio.Media.ARTIST, metadata.artist)
+                        add(
+                            MediaStore.Audio.Media.ARTIST,
+                            metadata.artists.joinToString(separator = "; ")
+                        )
                         add(MediaStore.Audio.Media.ALBUM, metadata.album)
                         add(MediaStore.Audio.Media.DURATION, metadata.durationMs)
                         add(MediaStore.Audio.Media.YEAR, metadata.year)
                         add(MediaStore.Audio.Media.TRACK, metadata.trackNumber)
+                        add(MediaStore.Audio.AudioColumns.TRACK, metadata.trackNumber)
+                        add(MediaStore.Audio.Media.DISC_NUMBER, metadata.discNumber)
+                        add(MediaStore.Audio.Media.DATE_ADDED, metadata.dateCreated)
+                        add(MediaStore.Audio.Media.IS_FAVORITE, metadata.isFavourite)
+                        add(MediaStore.Audio.Media.ALBUM_ARTIST, metadata.albumArtist)
+                        add(
+                            MediaStore.Audio.Media.GENRE,
+                            metadata.genres.joinToString(separator = "; ")
+                        )
                         add(MediaStore.Audio.Media.IS_MUSIC, 1)
+
+                        // Add lyrics if fetched
+                        if (lyrics != null) {
+                            add(COLUMN_TRACK_LYRICS, lyrics.content)
+                            if (lyrics.isSynced) {
+                                // Some versions of Poweramp might use this
+                                add(COLUMN_TRACK_LYRICS_SYNCED, lyrics.content)
+                            }
+                        }
 
                         // Poweramp flags (0x1 = FLAG_SUPPORTS_THUMBNAIL)
                         add("com.maxmpz.poweramp.provider.COLUMN_FLAGS", 0x1)
@@ -185,6 +211,10 @@ class JellyfinMusicProvider : DocumentsProvider() {
                 } catch (e: Exception) {
                     Log.e(TAG, "Error querying track", e)
                 }
+            }
+
+            else -> {
+                throw IOException("unimplemented $documentId!!")
             }
         }
 
@@ -194,79 +224,116 @@ class JellyfinMusicProvider : DocumentsProvider() {
     override fun queryChildDocuments(
         parentDocumentId: String, projection: Array<out String>?, sortOrder: String?
     ): Cursor {
+        val parentDocumentId = DocumentId.parse(parentDocumentId)
+        Log.i(TAG, "queryChildDocument $parentDocumentId")
+
         val result = MatrixCursor(projection ?: DEFAULT_DOCUMENT_PROJECTION)
 
-        runBlocking {
-            try {
-                when {
-                    parentDocumentId == ROOT_ID -> {
-                        // Show albums
-                        val albums = jellyfinClient.getAlbums(limit = 1000)
+        try {
+            when (parentDocumentId) {
+                is DocumentId.Type.Root -> {
+                    // TODO: List all albums
+                    val albums = runBlocking { jellyfinClient.getAlbums(limit = 1000) }
 
-                        albums.forEach { album ->
-                            result.newRow().apply {
-                                add(
-                                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                                    "album:${album.id}"
-                                )
-                                add(
-                                    DocumentsContract.Document.COLUMN_MIME_TYPE,
-                                    DocumentsContract.Document.MIME_TYPE_DIR
-                                )
-                                add(
-                                    DocumentsContract.Document.COLUMN_DISPLAY_NAME, album.name
-                                )
-                                add(
-                                    DocumentsContract.Document.COLUMN_FLAGS,
-                                    DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE or DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL
-                                )
-                            }
-                        }
-                    }
-
-                    parentDocumentId.startsWith("album:") -> {
-                        // Show tracks in album
-                        val albumId = parentDocumentId.removePrefix("album:")
-                        val tracks = jellyfinClient.getAlbumTracks(UUID.fromString(albumId))
-
-                        tracks.forEach withContext@{ track ->
-                            val metadata =
-                                jellyfinClient.getTrackMetadata(track.id) ?: return@withContext
-
-                            result.newRow().apply {
-                                add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, track.id)
-                                add(DocumentsContract.Document.COLUMN_MIME_TYPE, metadata.mimeType)
-                                add(
-                                    DocumentsContract.Document.COLUMN_DISPLAY_NAME, metadata.title
-                                )
-                                add(DocumentsContract.Document.COLUMN_SIZE, metadata.sizeBytes)
-                                add(
-                                    DocumentsContract.Document.COLUMN_LAST_MODIFIED,
-                                    metadata.dateModifiedMs
-                                )
-                                add(
-                                    DocumentsContract.Document.COLUMN_FLAGS,
-                                    DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL
-                                )
-
-                                // Poweramp metadata
-                                add(MediaStore.Audio.Media.TITLE, metadata.title)
-                                add(MediaStore.Audio.Media.ARTIST, metadata.artist)
-                                add(MediaStore.Audio.Media.ALBUM, metadata.album)
-                                add(MediaStore.Audio.Media.DURATION, metadata.durationMs)
-                                add(MediaStore.Audio.Media.YEAR, metadata.year)
-                                add(MediaStore.Audio.Media.TRACK, metadata.trackNumber)
-                                add(MediaStore.Audio.Media.IS_MUSIC, 1)
-
-                                // Poweramp flags
-                                add("com.maxmpz.poweramp.provider.COLUMN_FLAGS", 0x1)
-                            }
+                    albums.forEach { album ->
+                        result.newRow().apply {
+                            add(
+                                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                                DocumentId.forAlbum(album.id)
+                            )
+                            add(
+                                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                                DocumentsContract.Document.MIME_TYPE_DIR
+                            )
+                            add(
+                                DocumentsContract.Document.COLUMN_DISPLAY_NAME, album.name
+                            )
+                            add(
+                                DocumentsContract.Document.COLUMN_SUMMARY,
+                                "${album.songCount} Songs"
+                            )
+                            add(
+                                DocumentsContract.Document.COLUMN_FLAGS,
+                                DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL or DocumentsContract.Document.FLAG_SUPPORTS_METADATA
+                            )
                         }
                     }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error querying children", e)
+
+                is DocumentId.Type.Album -> {
+                    // Show tracks in album
+                    val tracks =
+                        runBlocking { jellyfinClient.getAlbumTracks(parentDocumentId.albumId) }
+
+                    tracks.forEach withContext@{ track ->
+                        val metadata = runBlocking { jellyfinClient.getTrackMetadata(track.id) }
+                            ?: return@withContext
+
+                        result.newRow().apply {
+                            add(
+                                DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentId.forTrack(
+                                    track.albumId ?: UUID.randomUUID(), track.id, metadata.sizeBytes
+                                )
+                            )
+                            add(DocumentsContract.Document.COLUMN_MIME_TYPE, metadata.mimeType)
+                            add(
+                                DocumentsContract.Document.COLUMN_DISPLAY_NAME, metadata.title
+                            )
+                            add(DocumentsContract.Document.COLUMN_SIZE, metadata.sizeBytes)
+                            add(
+                                DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+                                metadata.dateModifiedMs
+                            )
+                            add(
+                                DocumentsContract.Document.COLUMN_FLAGS,
+                                DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL
+                            )
+
+                            // Poweramp metadata
+                            add(MediaStore.Audio.Media.TITLE, metadata.title)
+                            add(
+                                MediaStore.Audio.Media.ARTIST,
+                                metadata.artists.joinToString(separator = "; ")
+                            )
+                            add(MediaStore.Audio.Media.ALBUM, metadata.album)
+                            add(MediaStore.Audio.Media.DURATION, metadata.durationMs)
+                            add(MediaStore.Audio.Media.YEAR, metadata.year)
+                            add(MediaStore.Audio.Media.TRACK, metadata.trackNumber)
+                            add(MediaStore.Audio.Media.DISC_NUMBER, metadata.discNumber)
+                            add(MediaStore.Audio.AudioColumns.TRACK, metadata.trackNumber)
+                            add(MediaStore.Audio.Media.DATE_ADDED, metadata.dateCreated)
+                            add(MediaStore.Audio.Media.IS_FAVORITE, metadata.isFavourite)
+                            add(MediaStore.Audio.Media.ALBUM_ARTIST, metadata.albumArtist)
+                            add(
+                                MediaStore.Audio.Media.GENRE,
+                                metadata.genres.joinToString(separator = "; ")
+                            )
+                            add(MediaStore.Audio.Media.IS_MUSIC, 1)
+
+                            // Poweramp flags
+                            add("com.maxmpz.poweramp.provider.COLUMN_FLAGS", 0x1)
+                        }
+                    }
+                }
+
+                is DocumentId.Type.Track -> {
+                    throw IOException("Should never query child documents of a Track!")
+                }
+
+                is DocumentId.Type.Lyric -> {
+                    throw IOException("Should never query child documents of a Lyric!")
+                }
+
+                is DocumentId.Type.Thumb -> {
+                    throw IOException("Should never query child documents of a Thumb!")
+                }
+
+                else -> {
+                    throw IOException("Unknown branch in queryChildDocument!")
+                }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error querying children", e)
         }
 
         return result
@@ -276,12 +343,17 @@ class JellyfinMusicProvider : DocumentsProvider() {
     openDocument is only ever used for audio content
      */
     override fun openDocument(
-        documentId: String, mode: String, signal: CancellationSignal?
+        docId: String, mode: String, signal: CancellationSignal?
     ): ParcelFileDescriptor {
-        Log.d(TAG, "jellyfin openDocument: $documentId")
+        val documentId = DocumentId.parse(docId)
+        Log.i(TAG, "jellyfin openDocument: $documentId mode=$mode")
+
+        if (documentId !is DocumentId.Type.Track) {
+            throw IOException("openDocument is not supported for any type except Tracks! type=$documentId")
+        }
 
         // 1. Check if fully cached
-        val cachedFile = cacheManager.getCachedFile(UUID.fromString(documentId))
+        val cachedFile = cacheManager.getCachedFile(documentId.trackId)
         if (cachedFile != null) {
             Log.d(TAG, "Serving from full cache: $documentId")
             return ParcelFileDescriptor.open(
@@ -290,45 +362,33 @@ class JellyfinMusicProvider : DocumentsProvider() {
         }
 
         // 2. Return a proxy FD for seekable streaming (Android 8+)
-        return openViaProxyFd(documentId, signal)
+        return openViaProxyFd(documentId)
     }
 
-    private fun openViaProxyFd(
-        documentId: String, signal: CancellationSignal?
-    ): ParcelFileDescriptor {
-        val trackId = UUID.fromString(documentId)
-        Log.d(TAG, "jellyfin openViaProxyFd $trackId")
+    private fun openViaProxyFd(documentId: DocumentId.Type.Track): ParcelFileDescriptor {
+        Log.d(TAG, "jellyfin openViaProxyFd ${documentId.trackId} from ${documentId.albumId}")
 
         val storageManager = context?.getSystemService(Context.STORAGE_SERVICE) as StorageManager
-
-        // We need metadata for size
-        val metadata = runBlocking { jellyfinClient.getTrackMetadata(trackId) }
-            ?: throw InterruptedException("Failed to read track metadata")
-        val totalSize = metadata.sizeBytes
-
-        val handlerThread = HandlerThread("ProxyFD-$trackId")
-        handlerThread.start()
         val handler = Handler(handlerThread.looper)
-
-        val cacheFile =
-            cacheManager.openFileForStreaming(trackId, metadata) ?: throw FileNotFoundException(
+        val cacheFile = cacheManager.openFileForStreaming(documentId.trackId, documentId.sizeBytes)
+            ?: throw FileNotFoundException(
                 "Cache file not found"
             )
         val channel = cacheFile.acquire()
 
         return storageManager.openProxyFileDescriptor(
             ParcelFileDescriptor.MODE_READ_ONLY, object : ProxyFileDescriptorCallback() {
-                override fun onGetSize(): Long = totalSize
+                override fun onGetSize(): Long = documentId.sizeBytes
 
                 override fun onRead(offset: Long, size: Int, data: ByteArray): Int {
-                    if (offset >= totalSize) return 0
+                    if (offset >= documentId.sizeBytes) return 0
 
                     // Check if the required chunks are available to fulfill request.
                     // If not, start a download in the background 1MB chunks to fulfill request and
                     // return as soon as offset...offset+size is available
                     runBlocking {
                         cacheManager.onReadTrack(
-                            trackId, metadata, jellyfinClient, offset, size
+                            documentId.trackId, documentId.sizeBytes, jellyfinClient, offset, size
                         )
                     }
 
@@ -338,9 +398,12 @@ class JellyfinMusicProvider : DocumentsProvider() {
                 }
 
                 override fun onRelease() {
-                    Log.d(TAG, "openViaProxyFd onRelease $trackId")
+                    Log.d(
+                        TAG,
+                        "openViaProxyFd onRelease ${documentId.trackId} from ${documentId.albumId}"
+                    )
                     cacheFile.release()
-                    handlerThread.quitSafely()
+
                 }
             }, handler
         )
@@ -349,29 +412,25 @@ class JellyfinMusicProvider : DocumentsProvider() {
     override fun openDocumentThumbnail(
         documentId: String, sizeHint: Point?, signal: CancellationSignal?
     ): android.content.res.AssetFileDescriptor {
+        val docId = DocumentId.parse(documentId)
 
-        Log.d(TAG, "jellyfin openDocumentThumbnail $documentId")
-
-        var documentId = documentId
-        if (documentId.startsWith("album:")) {
-            documentId = documentId.removePrefix("album:")
+        val albumId = if (docId is DocumentId.Type.Album) {
+            docId.albumId
+        } else if (docId is DocumentId.Type.Track) {
+            docId.albumId
+        } else {
+            throw IOException("openDocumentThumbnail is only supported for albums & tracks. Got $docId")
         }
 
-        var itemId = UUID.fromString(documentId)
-
-        // Get album ID for track
-        itemId = runBlocking {
-            jellyfinClient.getTrackMetadata(itemId)?.albumId ?: itemId
-        }
+        Log.i(TAG, "openDocumentThumbnail document=$documentId album=$albumId sizeHint=$sizeHint")
 
         // Check thumbnail cache
-        var thumbFile = cacheManager.getCachedThumbnail(itemId)
+        var thumbFile = cacheManager.getCachedThumbnail(albumId)
 
         if (thumbFile == null) {
             // Download thumbnail
-            Log.w(TAG, "jellyfin openDocumentThumbnail item=$itemId")
             thumbFile = runBlocking {
-                cacheManager.downloadThumbnail(itemId, jellyfinClient)
+                cacheManager.downloadThumbnail(albumId, jellyfinClient, sizeHint)
             } ?: throw FileNotFoundException("Thumbnail not available")
         }
 
@@ -383,8 +442,8 @@ class JellyfinMusicProvider : DocumentsProvider() {
     }
 
     override fun shutdown() {
-        scope.cancel()
         cacheManager.shutdown()
+        handlerThread.quitSafely()
         super.shutdown()
     }
 
@@ -394,12 +453,10 @@ class JellyfinMusicProvider : DocumentsProvider() {
         // Everything we serve is under the root
         if (parentDocumentId == ROOT_ID) return true
 
-        // Tracks are children of albums
-        if (parentDocumentId.startsWith("album:") && !documentId.startsWith("album:")) {
-            // In our system, tracks have raw UUIDs, albums have "album:" prefix
-            return true
-        }
+        val parentId = DocumentId.parse(parentDocumentId)
+        val docId = DocumentId.parse(documentId)
 
-        return false
+        // Tracks are children of albums
+        return parentId is DocumentId.Type.Album && (docId !is DocumentId.Type.Album)
     }
 }
