@@ -275,7 +275,7 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
                         String.format(
                             "%.2f MB", breakdown.totalSize / (1024.0 * 1024.0)
                         )
-                    }",
+                    }  / ${breakdown.completeSongsNum + breakdown.partialSongsNum} Songs",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.padding(bottom = 4.dp)
@@ -285,7 +285,16 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
                         String.format(
                             "%.2f MB", breakdown.partialFilesSize / (1024.0 * 1024.0)
                         )
-                    }",
+                    }  / ${breakdown.partialSongsNum} Songs",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "  • Favourite files: ${
+                        String.format(
+                            "%.2f MB", breakdown.favouriteFilesSize / (1024.0 * 1024.0)
+                        )
+                    } / ${breakdown.favouriteSongsNum} Songs",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -294,7 +303,7 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
                         String.format(
                             "%.2f MB", breakdown.completeFilesSize / (1024.0 * 1024.0)
                         )
-                    }",
+                    } / ${breakdown.completeSongsNum} Songs",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

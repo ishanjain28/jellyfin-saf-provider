@@ -93,7 +93,7 @@ object TrackCacheManagerSingleton {
 class TrackCacheManager(
     context: Context, maxCacheSizeMB: Long = 2048
 ) {
-    private val cacheDir = File(context.cacheDir, "jellyfin_tracks").apply { mkdirs() }
+    private val tracksDir = File(context.dataDir, "jellyfin_tracks").apply { mkdirs() }
     private val thumbDir = File(context.cacheDir, "jellyfin_thumbs").apply { mkdirs() }
     private val db = DatabaseManager.getInstance(context)
     private val trackBitSets = ConcurrentHashMap<UUID, BitSet>()
@@ -108,7 +108,7 @@ class TrackCacheManager(
     private fun getFileHandle(trackId: UUID, size: Long): RefCountedAsyncFileChannel {
         return fileChannels.computeIfAbsent(trackId) {
             RefCountedAsyncFileChannel(
-                File(cacheDir, "$trackId.cache"), "rw", size, onClosed = {
+                File(tracksDir, "$trackId.cache"), "rw", size, onClosed = {
                     activeChunkDownloads.filterKeys { it.first == trackId }.forEach { (key, job) ->
                         job.cancel()
                         activeChunkDownloads.remove(key)
@@ -125,7 +125,7 @@ class TrackCacheManager(
 
         if (entry.state == ContentState.COMPLETE) {
             db.updateLastAccessTime(trackId, System.currentTimeMillis())
-            return entry.getFile(cacheDir).takeIf { it.exists() }
+            return entry.getFile(tracksDir).takeIf { it.exists() }
         }
 
         return null
@@ -198,7 +198,7 @@ class TrackCacheManager(
                         TAG, "Chunk $size at $offset download ended for $trackId with ${e.message}"
                     )
                 } finally {
-                    activeChunkDownloads.remove(key)?.cancel()
+                    activeChunkDownloads.remove(key)
                     chunkProgress.remove(key)
                     db.updateChunks(
                         trackId, synchronized(chunks) { chunks })
@@ -256,7 +256,7 @@ class TrackCacheManager(
     fun deletePartialFiles(excludeFavourites: Boolean = true) {
         val partialTracks = db.getAllTracks(ContentState.PARTIAL, excludeFavourites)
         partialTracks.forEach { trackId ->
-            val file = File(cacheDir, "$trackId.cache")
+            val file = File(tracksDir, "$trackId.cache")
             if (file.exists()) {
                 file.delete()
                 Log.d(TAG, "Deleted partial file: $trackId")
@@ -281,7 +281,7 @@ class TrackCacheManager(
     fun deleteAllTracks(excludeFavourites: Boolean = true) {
         val allTracks = db.getAllTracks(null, excludeFavourites)
         allTracks.forEach { trackId ->
-            val file = File(cacheDir, "$trackId.cache")
+            val file = File(tracksDir, "$trackId.cache")
             if (file.exists()) {
                 file.delete()
                 Log.d(TAG, "Deleted track file: $trackId")
@@ -295,7 +295,7 @@ class TrackCacheManager(
     fun deleteFavouriteTracks() {
         val favouriteTracks = db.getFavouriteTracks()
         favouriteTracks.forEach { trackId ->
-            val file = File(cacheDir, "$trackId.cache")
+            val file = File(tracksDir, "$trackId.cache")
             if (file.exists()) {
                 file.delete()
                 Log.d(TAG, "Deleted favourite track file: $trackId")
@@ -307,7 +307,11 @@ class TrackCacheManager(
 
     data class CacheSizeBreakdown(
         val partialFilesSize: Long,
+        val partialSongsNum: Int,
+        val favouriteFilesSize: Long,
+        val favouriteSongsNum: Int,
         val completeFilesSize: Long,
+        val completeSongsNum: Int,
         val albumArtsSize: Long,
         val databaseSize: Long
     ) {
@@ -319,7 +323,7 @@ class TrackCacheManager(
         var totalSize = 0L
 
         // Calculate tracks cache
-        cacheDir.listFiles()?.forEach { file ->
+        tracksDir.listFiles()?.forEach { file ->
             totalSize += file.length()
         }
 
@@ -333,29 +337,48 @@ class TrackCacheManager(
 
     fun getCacheSizeBreakdown(context: Context): CacheSizeBreakdown {
         var partialSize = 0L
+        var partialNum = 0
         var completeSize = 0L
+        var completeNum = 0
+        var favouritesSize = 0L
+        var favouriteNum = 0
 
         val partialTracks = db.getAllTracks(ContentState.PARTIAL, false).toSet()
+        val favouriteTracks = db.getFavouriteTracks().toSet()
 
-        cacheDir.listFiles()?.forEach { file ->
+        tracksDir.listFiles()?.forEach { file ->
             val trackId = try {
                 UUID.fromString(file.nameWithoutExtension)
             } catch (e: Exception) {
                 null
             }
+            if (trackId == null) {
+                return@forEach
+            }
 
-            if (trackId != null) {
-                if (partialTracks.contains(trackId)) {
-                    // For partial files: calculate actual usage from chunks bitset
-                    val record = db.getMediaCacheRecord(trackId)
-                    partialSize += if (record != null) {
-                        record.getChunks().cardinality().toLong() * MediaCacheRecord.CHUNK_SIZE
-                    } else {
-                        0L
-                    }
+            if (partialTracks.contains(trackId)) {
+                partialNum += 1
+                // For partial files: calculate actual usage from chunks bitset
+                val record = db.getMediaCacheRecord(trackId)
+                val size = if (record != null) {
+                    record.getChunks().cardinality().toLong() * MediaCacheRecord.CHUNK_SIZE
                 } else {
-                    // For complete files: file.length() is accurate
-                    completeSize += file.length()
+                    0L
+                }
+                if (favouriteTracks.contains(trackId)) {
+                    favouriteNum += 1
+                    favouritesSize += size
+                }
+
+                partialSize += size
+            } else {
+                completeNum += 1;
+                // For complete files: file.length() is accurate
+                val l = file.length()
+                completeSize += l
+                if (favouriteTracks.contains(trackId)) {
+                    favouriteNum += 1
+                    favouritesSize += l
                 }
             }
         }
@@ -370,7 +393,11 @@ class TrackCacheManager(
 
         return CacheSizeBreakdown(
             partialFilesSize = partialSize,
+            partialSongsNum = partialNum,
+            favouriteFilesSize = favouritesSize,
+            favouriteSongsNum = favouriteNum,
             completeFilesSize = completeSize,
+            completeSongsNum = completeNum,
             albumArtsSize = albumArtsSize,
             databaseSize = dbSize
         )

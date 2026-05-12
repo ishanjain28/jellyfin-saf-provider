@@ -29,8 +29,8 @@ data class MediaCacheRecord(
     val sizeBytes: Long,
     val lastAccessTime: Long
 ) {
-    fun getFile(cacheDir: File): File {
-        return File(cacheDir, "$id.cache")
+    fun getFile(dataDir: File): File {
+        return File(dataDir, "$id.cache")
     }
 
     fun getChunks(): BitSet {
@@ -451,36 +451,24 @@ class MediaDatabaseHelper(context: Context?) :
     fun markOpenedForStreaming(id: UUID) {
         val db = writableDatabase
         db.transaction {
-            val lastFetched: Long? = query(
-                TABLE_METADATA,
-                arrayOf(COL_LAST_FETCHED),
-                "$COL_META_ID = ?",
-                arrayOf(id.toString()),
-                null,
-                null,
-                null
-            ).use { cursor ->
-                if (cursor.moveToFirst()) {
-                    cursor.getLong(cursor.getColumnIndexOrThrow(COL_LAST_FETCHED))
-                } else {
-                    null
+            val existing = getMediaCacheRecord(id)
+
+            if (existing != null) {
+                // Record exists - just update last access, don't touch chunks!
+                val values = ContentValues().apply {
+                    put(COL_LAST_ACCESSED, System.currentTimeMillis())
                 }
+                update(TABLE_METADATA, values, "$COL_META_ID = ?", arrayOf(id.toString()))
+            } else {
+                // New record - initialize with empty chunks
+                val values = ContentValues().apply {
+                    put(COL_META_ID, id.toString())
+                    put(COL_META_STATE, ContentState.PARTIAL.name)
+                    put(COL_META_CHUNKS, BitSet(256).toByteArray())
+                    put(COL_LAST_FETCHED, 0)
+                }
+                upsertData(id, values)
             }
-
-            val values = ContentValues().apply {
-                put(COL_META_ID, id.toString())
-                put(COL_META_STATE, ContentState.PARTIAL.name)
-                put(COL_META_CHUNKS, BitSet(256).toByteArray())
-            }
-
-            if (lastFetched == null) {
-                // We got a request to open this song because of the cache in poweramp,
-                // but we have no other data for it!
-                // Set this to 0 so it'll pull full data whenever poweramp tries to read it next.
-                values.put(COL_LAST_FETCHED, 0)
-            }
-
-            upsertData(id, values)
         }
     }
 

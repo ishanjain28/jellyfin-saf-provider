@@ -427,12 +427,23 @@ class JellyfinClientManager(private val context: Context? = null) {
                 val buffer = ByteArray(32 * 1024)
                 var bytesRead: Int
                 var totalDownloaded = 0L
+                var lastProgressBoundary = 0L
+                val progressThreshold = 64 * 1024  // 64KB - Poweramp's typical read size
 
                 while (input.read(buffer).also { bytesRead = it } != -1) {
                     channel.writeAt(buffer, byteOffset + totalDownloaded, 0, bytesRead)
                     totalDownloaded += bytesRead
-                    onProgress?.invoke(byteOffset + totalDownloaded)
+
+                    // Only invoke progress callback when crossing 64KB boundaries
+                    val currentBoundary = totalDownloaded / progressThreshold
+                    if (currentBoundary > lastProgressBoundary) {
+                        onProgress?.invoke(byteOffset + totalDownloaded)
+                        lastProgressBoundary = currentBoundary
+                    }
                 }
+
+                // Final progress update to ensure we report completion
+                onProgress?.invoke(byteOffset + totalDownloaded)
             }
             true
         } catch (e: InvalidStatusException) {
