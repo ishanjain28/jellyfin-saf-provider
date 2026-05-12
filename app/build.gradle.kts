@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "me.ishan.poweramp_jf"
+    namespace = "me.ishan.jellyfin_saf"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
@@ -13,7 +13,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "me.ishan.poweramp_jf"
+        applicationId = "me.ishan.jellyfin_saf"
         minSdk = 26
         targetSdk = 36
         versionCode = 1

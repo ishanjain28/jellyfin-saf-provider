@@ -1,4 +1,4 @@
-package me.ishan.poweramp_jf.ui.theme
+package me.ishan.jellyfin_saf.ui.theme
 
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle

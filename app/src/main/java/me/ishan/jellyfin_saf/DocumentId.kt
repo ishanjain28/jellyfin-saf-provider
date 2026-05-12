@@ -1,4 +1,4 @@
-package me.ishan.poweramp_jf
+package me.ishan.jellyfin_saf
 
 import org.jellyfin.sdk.model.UUID
 

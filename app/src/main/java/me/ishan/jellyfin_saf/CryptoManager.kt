@@ -1,4 +1,4 @@
-package me.ishan.poweramp_jf
+package me.ishan.jellyfin_saf
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties

@@ -1,4 +1,4 @@
-package me.ishan.poweramp_jf.ui.theme
+package me.ishan.jellyfin_saf.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -33,7 +33,7 @@ private val LightColorScheme = lightColorScheme(
 )
 
 @Composable
-fun PowerampjfTheme(
+fun JellyfinSaf(
     darkTheme: Boolean = isSystemInDarkTheme(),
     // Dynamic color is available on Android 12+
     dynamicColor: Boolean = true,

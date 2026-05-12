@@ -1,4 +1,4 @@
-package me.ishan.poweramp_jf
+package me.ishan.jellyfin_saf
 
 import android.content.Context
 import android.database.Cursor
@@ -16,7 +16,7 @@ import android.provider.MediaStore
 import android.util.Log
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
-import me.ishan.poweramp_jf.DocumentId.ROOT_ID
+import me.ishan.jellyfin_saf.DocumentId.ROOT_ID
 import org.jellyfin.sdk.model.UUID
 import java.io.FileNotFoundException
 import java.io.IOException

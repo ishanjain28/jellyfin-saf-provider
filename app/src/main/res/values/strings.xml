@@ -1,5 +1,4 @@
 <resources>
     <string name="app_name">Jellyfin Provider</string>
-    <string name="poweramp_label">Jellyfin</string>
     <string name="documents_authority">jellyfin.music</string>
 </resources>

@@ -1,4 +1,4 @@
-package me.ishan.poweramp_jf
+package me.ishan.jellyfin_saf
 
 import android.annotation.SuppressLint
 import android.os.Bundle
@@ -46,14 +46,14 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import me.ishan.poweramp_jf.ui.theme.PowerampjfTheme
+import me.ishan.jellyfin_saf.ui.theme.JellyfinSaf
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            PowerampjfTheme {
+            JellyfinSaf {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     JellyfinSettings(
                         modifier = Modifier.padding(innerPadding)
