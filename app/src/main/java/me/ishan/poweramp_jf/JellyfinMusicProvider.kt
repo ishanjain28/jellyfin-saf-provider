@@ -28,6 +28,7 @@ class JellyfinMusicProvider : DocumentsProvider() {
     private lateinit var jellyfinClient: JellyfinClientManager
     private lateinit var cacheManager: TrackCacheManager
     private lateinit var handlerThread: HandlerThread
+    private lateinit var db: MediaDatabaseHelper
 
     companion object {
         private const val TAG = "JellyfinMusicProvider"
@@ -84,6 +85,8 @@ class JellyfinMusicProvider : DocumentsProvider() {
             handlerThread = HandlerThread("JellyfinSAFProxyThread")
             handlerThread.start()
 
+            db = MediaDatabaseHelper(ctx)
+
             Log.i(TAG, "JellyfinMusicProvider initialized with server: ${jellyfinClient.getUrl()}")
 
             return true
@@ -136,7 +139,9 @@ class JellyfinMusicProvider : DocumentsProvider() {
             is DocumentId.Type.Track -> {
                 try {
                     val (meta, lyrics) = runBlocking {
-                        var p1 = async { jellyfinClient.getTrackMetadata(documentId.trackId) }
+                        val p1 = async {
+                            jellyfinClient.getTrackMetadata(documentId.trackId)
+                        }
 
                         // Fetch lyrics if requested
                         var p2 = if (projection != null && (projection.contains(
@@ -196,11 +201,9 @@ class JellyfinMusicProvider : DocumentsProvider() {
                         )
                         add(MediaStore.Audio.Media.IS_MUSIC, 1)
 
-                        // Add lyrics if fetched
                         if (lyrics != null) {
                             add(COLUMN_TRACK_LYRICS, lyrics.content)
                             if (lyrics.isSynced) {
-                                // Some versions of Poweramp might use this
                                 add(COLUMN_TRACK_LYRICS_SYNCED, lyrics.content)
                             }
                         }
@@ -266,8 +269,27 @@ class JellyfinMusicProvider : DocumentsProvider() {
                         runBlocking { jellyfinClient.getAlbumTracks(parentDocumentId.albumId) }
 
                     tracks.forEach withContext@{ track ->
-                        val metadata = runBlocking { jellyfinClient.getTrackMetadata(track.id) }
-                            ?: return@withContext
+
+                        val (meta, lyrics) = runBlocking {
+                            val p1 = async {
+                                jellyfinClient.getTrackMetadata(track.id)
+                            }
+
+                            // Fetch lyrics!
+                            var p2 = if (projection != null && (projection.contains(
+                                    COLUMN_TRACK_LYRICS
+                                ) || projection.contains(
+                                    COLUMN_TRACK_LYRICS_SYNCED
+                                ))
+                            ) {
+                                async { jellyfinClient.getLyrics(track.id) }
+                            } else {
+                                async { null }
+                            }
+
+                            p1.await() to p2.await()
+                        }
+                        val metadata = meta ?: return@withContext
 
                         result.newRow().apply {
                             add(
@@ -309,6 +331,12 @@ class JellyfinMusicProvider : DocumentsProvider() {
                                 metadata.genres.joinToString(separator = "; ")
                             )
                             add(MediaStore.Audio.Media.IS_MUSIC, 1)
+                            if (lyrics != null) {
+                                add(COLUMN_TRACK_LYRICS, lyrics.content)
+                                if (lyrics.isSynced) {
+                                    add(COLUMN_TRACK_LYRICS_SYNCED, lyrics.content)
+                                }
+                            }
 
                             // Poweramp flags
                             add("com.maxmpz.poweramp.provider.COLUMN_FLAGS", 0x1)
@@ -422,7 +450,9 @@ class JellyfinMusicProvider : DocumentsProvider() {
             throw IOException("openDocumentThumbnail is only supported for albums & tracks. Got $docId")
         }
 
-        Log.i(TAG, "openDocumentThumbnail document=$documentId album=$albumId sizeHint=$sizeHint")
+        Log.i(
+            TAG, "openDocumentThumbnail document=$documentId album=$albumId sizeHint=$sizeHint"
+        )
 
         // Check thumbnail cache
         var thumbFile = cacheManager.getCachedThumbnail(albumId)

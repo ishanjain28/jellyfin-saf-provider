@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import okio.IOException
 import org.jellyfin.sdk.model.UUID
 import java.io.File
 import java.nio.ByteBuffer
@@ -95,7 +96,7 @@ class TrackCacheManager(
     }
 
     fun getCachedFile(trackId: UUID): File? {
-        val entry = db.getRecord(trackId) ?: return null
+        val entry = db.getMediaCacheRecord(trackId) ?: return null
 
         if (entry.state == ContentState.COMPLETE) {
             db.updateLastAccessTime(trackId, System.currentTimeMillis())
@@ -112,18 +113,7 @@ class TrackCacheManager(
             Log.e(TAG, "Failed to create sparse cache file for $trackId", e)
             return null
         } finally {
-            if (db.getRecord(trackId) == null) {
-                db.insertOrUpdate(
-                    MediaCacheRecord(
-                        id = trackId,
-                        type = MediaType.TRACK,
-                        state = ContentState.PARTIAL,
-                        chunks = BitSet(256),
-                        sizeBytes = sizeBytes,
-                        lastAccessTime = System.currentTimeMillis(),
-                    )
-                )
-            }
+            db.markOpenedForStreaming(trackId)
         }
     }
 
@@ -135,7 +125,7 @@ class TrackCacheManager(
         offset: Long,
         size: Int,
     ) {
-        val entry = db.getRecord(trackId) ?: return
+        val entry = db.getMediaCacheRecord(trackId) ?: return
         val chunks = trackBitSets.getOrPut(trackId) { entry.getChunks() }
 
         val startChunk = (offset / MediaCacheRecord.CHUNK_SIZE).toInt()

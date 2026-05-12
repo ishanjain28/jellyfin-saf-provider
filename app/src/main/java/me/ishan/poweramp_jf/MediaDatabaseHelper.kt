@@ -10,6 +10,8 @@ import org.jellyfin.sdk.model.UUID
 import java.io.File
 import java.util.BitSet
 import androidx.core.database.sqlite.transaction
+import org.jellyfin.sdk.model.DateTime
+import java.time.LocalDateTime
 
 enum class MediaType {
     ALBUM, TRACK
@@ -22,7 +24,6 @@ enum class ContentState {
 
 data class MediaCacheRecord(
     val id: UUID,
-    val type: MediaType,
     val state: ContentState,
     private val chunks: BitSet,
     val sizeBytes: Long,
@@ -41,7 +42,59 @@ data class MediaCacheRecord(
     }
 }
 
-class MediaDatabaseHelper(context: Context) :
+data class TrackMetadata(
+    val id: UUID,
+    val title: String,
+    val artists: List<String>,
+    val album: String,
+    val albumId: UUID?,
+    val year: Int?,
+    val durationMs: Long,
+    val sizeBytes: Long,
+    val trackNumber: Int?,
+    val numTracks: Int?,
+    val discNumber: Int?,
+    val dateModifiedMs: DateTime?,
+    val mimeType: String,
+    val genres: List<String>,
+    val albumArtist: String,
+    val dateCreated: DateTime?,
+    val isFavourite: Boolean = false,
+    val lyrics: String? = null,
+
+    // used locally
+    val lastFetched: Long? = null,
+    val lastAccessed: Long? = null,
+) {
+    companion object {
+        const val MULTIVALUE_SEP = " // "
+        const val CHUNK_SIZE: Long = 2 * 1024 * 1024 // 2MiB
+        const val STALE_LIMIT: Long = 2 * 24 * 60 * 60 * 1000 // 2 Days
+    }
+
+    fun isStale(): Boolean {
+        return lastFetched != null && (System.currentTimeMillis() - lastFetched) >= STALE_LIMIT
+    }
+}
+
+data class LyricsMetadata(
+    val id: UUID,
+    val content: String,
+    val isSynced: Boolean,
+    // used locally
+    val lastFetched: Long? = null,
+    val lastAccessed: Long? = null,
+) {
+    companion object {
+        const val STALE_LIMIT: Long = 7 * 24 * 60 * 60 * 1000 // 7 Days}
+    }
+
+    fun isStale(): Boolean {
+        return lastFetched != null && (System.currentTimeMillis() - lastFetched) >= STALE_LIMIT
+    }
+}
+
+class MediaDatabaseHelper(context: Context?) :
     SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
 
     override fun onConfigure(db: SQLiteDatabase?) {
@@ -53,138 +106,402 @@ class MediaDatabaseHelper(context: Context) :
         private const val DATABASE_NAME = "jellyfin_media_cache.db"
         private const val DATABASE_VERSION = 1
 
-        private const val TABLE_NAME = "cache_records"
-        private const val COL_ID = "id"
-        private const val COL_TYPE = "type"
-        private const val COL_STATE = "state"
-        private const val COL_CHUNKS = "chunks"
-        private const val COL_SIZE_BYTES = "size_bytes"
-        private const val COL_LAST_ACCESS_TIME = "last_access_time"
+        private const val TABLE_METADATA = "track_metadata"
+        private const val COL_META_ID = "id"
+        private const val COL_META_TITLE = "title"
+        private const val COL_META_STATE = "state"
+        private const val COL_META_ARTIST = "artist"
+        private const val COL_META_ALBUM = "album"
+        private const val COL_META_ALBUM_ID = "album_id"
+        private const val COL_META_DURATION = "duration"
+        private const val COL_META_SIZE = "size"
+        private const val COL_META_MIME = "mime_type"
+        private const val COL_META_TRACK_NUM = "track_number"
+        private const val COL_META_DISC_NUM = "disc_number"
+        private const val COL_META_ALBUM_ARTIST = "album_artist"
+        private const val COL_META_DATE_MODIFIED = "date_modified"
+        private const val COL_META_DATE_CREATED = "date_created"
+        private const val COL_META_IS_FAVOURITE = "is_favourite"
+        private const val COL_META_NUM_TRACKS = "num_tracks"
+        private const val COL_META_YEAR = "year"
+        private const val COL_META_GENRES = "genres"
+        private const val COL_META_TRACK_LYRICS = "lyrics"
+        private const val COL_META_TRACK_LYRICS_SYNCED = "lyrics_synced"
+        private const val COL_META_CHUNKS = "chunks"
+        private const val COL_LAST_FETCHED = "last_fetched"
+        private const val COL_LAST_ACCESSED = "last_accessed"
     }
 
     override fun onCreate(db: SQLiteDatabase) {
-        val createTableQuery = """
-            CREATE TABLE $TABLE_NAME (
-                $COL_ID TEXT PRIMARY KEY,
-                $COL_TYPE TEXT NOT NULL,
-                $COL_STATE TEXT NOT NULL,
-                $COL_CHUNKS BLOB NOT NULL,
-                $COL_SIZE_BYTES INTEGER NOT NULL,
-                $COL_LAST_ACCESS_TIME INTEGER NOT NULL
+        val createMetaTable = """
+            CREATE TABLE $TABLE_METADATA (
+                $COL_META_ID TEXT PRIMARY KEY,
+                $COL_META_TITLE TEXT,
+                $COL_META_STATE TEXT NOT NULL DEFAULT ${ContentState.PARTIAL},
+                $COL_META_ARTIST TEXT,
+                $COL_META_ALBUM TEXT,
+                $COL_META_ALBUM_ID TEXT,
+                $COL_META_DURATION INTEGER,
+                $COL_META_SIZE INTEGER,
+                $COL_META_MIME TEXT,
+                $COL_META_TRACK_NUM INTEGER,
+                $COL_META_DISC_NUM INTEGER,
+                $COL_META_ALBUM_ARTIST TEXT,
+                $COL_META_DATE_MODIFIED TEXT,
+                $COL_META_DATE_CREATED TEXT,
+                $COL_META_IS_FAVOURITE INTEGER DEFAULT 0,
+                $COL_META_NUM_TRACKS INTEGER DEFAULT 0,
+                $COL_META_YEAR INTEGER,
+                $COL_META_GENRES TEXT,
+                $COL_META_TRACK_LYRICS TEXT,
+                $COL_META_TRACK_LYRICS_SYNCED INTEGER DEFAULT 0,
+                $COL_META_CHUNKS BLOB,
+                $COL_LAST_FETCHED INTEGER NOT NULL,
+                $COL_LAST_ACCESSED INTEGER NOT NULL
             )
         """.trimIndent()
-        db.execSQL(createTableQuery)
+        db.execSQL(createMetaTable)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS $TABLE_NAME")
-        onCreate(db)
-    }
-
-    fun insertOrUpdate(record: MediaCacheRecord) {
-        val db = writableDatabase
-        val values = ContentValues().apply {
-            put(COL_ID, record.id.toString())
-            put(COL_TYPE, record.type.name)
-            put(COL_STATE, record.state.name)
-            put(COL_CHUNKS, record.getChunks().toByteArray())
-            put(COL_SIZE_BYTES, record.sizeBytes)
-            put(COL_LAST_ACCESS_TIME, record.lastAccessTime)
+        if (oldVersion < 1) {
+            val createMetaTable = """
+                CREATE TABLE $TABLE_METADATA (
+                    $COL_META_ID TEXT PRIMARY KEY,
+                    $COL_META_TITLE TEXT,
+                    $COL_META_STATE TEXT NOT NULL DEFAULT ${ContentState.PARTIAL},
+                    $COL_META_ARTIST TEXT,
+                    $COL_META_ALBUM TEXT,
+                    $COL_META_ALBUM_ID TEXT,
+                    $COL_META_DURATION INTEGER,
+                    $COL_META_SIZE INTEGER,
+                    $COL_META_MIME TEXT,
+                    $COL_META_TRACK_NUM INTEGER,
+                    $COL_META_DISC_NUM INTEGER,
+                    $COL_META_ALBUM_ARTIST TEXT,
+                    $COL_META_DATE_MODIFIED TEXT,
+                    $COL_META_DATE_CREATED TEXT,
+                    $COL_META_IS_FAVOURITE INTEGER DEFAULT 0,
+                    $COL_META_NUM_TRACKS INTEGER DEFAULT 0,
+                    $COL_META_YEAR INTEGER,
+                    $COL_META_GENRES TEXT,
+                    $COL_META_TRACK_LYRICS TEXT,
+                    $COL_META_TRACK_LYRICS_SYNCED TEXT DEFAULT 0,
+                    $COL_META_CHUNKS BLOB NOT NULL,
+                    $COL_LAST_FETCHED INTEGER NOT NULL,
+                    $COL_LAST_ACCESSED INTEGER NOT NULL
+                )
+            """.trimIndent()
+            db.execSQL(createMetaTable)
         }
-        db.replace(TABLE_NAME, null, values)
     }
 
-    fun getRecord(id: UUID): MediaCacheRecord? {
+    fun saveMetadata(metadata: TrackMetadata) {
+        val values = ContentValues().apply {
+            put(COL_META_ID, metadata.id.toString())
+            put(COL_META_TITLE, metadata.title)
+            put(COL_META_ARTIST, metadata.artists.joinToString(TrackMetadata.MULTIVALUE_SEP))
+            put(COL_META_ALBUM, metadata.album)
+            put(COL_META_ALBUM_ID, metadata.albumId?.toString())
+            put(COL_META_DURATION, metadata.durationMs)
+            put(COL_META_SIZE, metadata.sizeBytes)
+            put(COL_META_MIME, metadata.mimeType)
+            put(COL_META_TRACK_NUM, metadata.trackNumber)
+            put(COL_META_DISC_NUM, metadata.discNumber)
+            put(COL_META_ALBUM_ARTIST, metadata.albumArtist)
+            put(COL_META_DATE_MODIFIED, metadata.dateModifiedMs.toString())
+            put(COL_META_DATE_CREATED, metadata.dateCreated.toString())
+            put(COL_META_IS_FAVOURITE, metadata.isFavourite)
+            put(COL_META_NUM_TRACKS, metadata.numTracks)
+            put(COL_META_YEAR, metadata.year)
+            put(COL_META_GENRES, metadata.genres.joinToString(TrackMetadata.MULTIVALUE_SEP))
+            put(COL_LAST_FETCHED, metadata.lastFetched ?: System.currentTimeMillis())
+            put(COL_LAST_ACCESSED, metadata.lastAccessed ?: System.currentTimeMillis())
+        }
+
+        upsertData(metadata.id, values)
+    }
+
+    fun saveLyrics(trackId: UUID, content: String?, isSynced: Boolean) {
+        val values = ContentValues().apply {
+            put(COL_META_ID, trackId.toString())
+            put(COL_META_TRACK_LYRICS, content)
+            put(COL_META_TRACK_LYRICS_SYNCED, isSynced)
+        }
+
+        upsertData(trackId, values)
+    }
+
+    fun getCachedMetadata(trackId: UUID): TrackMetadata? {
+        // TODO: update last accessed
         val db = readableDatabase
         return db.query(
-            TABLE_NAME, null, "$COL_ID = ?", arrayOf(id.toString()), null, null, null
+            TABLE_METADATA, arrayOf(
+                COL_META_ID,
+                COL_META_TITLE,
+                COL_META_ARTIST,
+                COL_META_ALBUM,
+                COL_META_ALBUM_ID,
+                COL_META_DURATION,
+                COL_META_SIZE,
+                COL_META_MIME,
+                COL_META_TRACK_NUM,
+                COL_META_DISC_NUM,
+                COL_META_ALBUM_ARTIST,
+                COL_META_DATE_MODIFIED,
+                COL_META_DATE_CREATED,
+                COL_META_IS_FAVOURITE,
+                COL_META_NUM_TRACKS,
+                COL_META_YEAR,
+                COL_META_GENRES,
+                COL_LAST_FETCHED,
+                COL_LAST_ACCESSED
+            ), "$COL_META_ID = ?", arrayOf(trackId.toString()), null, null, null
         ).use { cursor ->
             if (cursor.moveToFirst()) {
-                mapCursorToRecord(cursor)
+                mapCursorToMetadata(cursor)
+            } else null
+        }
+    }
+
+    fun getCachedLyrics(trackId: UUID): LyricsMetadata? {
+        // TODO: update last accessed
+        val db = readableDatabase
+        return db.query(
+            TABLE_METADATA,
+            arrayOf(COL_META_TRACK_LYRICS, COL_META_TRACK_LYRICS_SYNCED, COL_LAST_FETCHED),
+            "$COL_META_ID = ?",
+            arrayOf(trackId.toString()),
+            null,
+            null,
+            null
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                val lastFetched = cursor.getLong(cursor.getColumnIndexOrThrow(COL_LAST_FETCHED))
+                val lyrics = cursor.getString(cursor.getColumnIndexOrThrow(COL_META_TRACK_LYRICS))
+                val isSynced =
+                    (cursor.getInt(cursor.getColumnIndexOrThrow(COL_META_TRACK_LYRICS_SYNCED)) == 1)
+
+                if (lyrics == null) {
+                    return null
+                }
+
+                return LyricsMetadata(
+                    id = trackId,
+                    content = lyrics,
+                    isSynced = isSynced,
+                    lastAccessed = System.currentTimeMillis(),
+                    lastFetched = lastFetched,
+                )
+            } else null
+        }
+    }
+
+    private fun mapCursorToMetadata(cursor: Cursor): TrackMetadata {
+        return TrackMetadata(
+            id = cursor.getString(
+                cursor.getColumnIndexOrThrow(COL_META_ID)
+            )?.let { UUID.fromString(it) }!!,
+            title = cursor.getString(
+                cursor.getColumnIndexOrThrow(COL_META_TITLE)
+            ) ?: "Unknown Title",
+            artists = cursor.getString(cursor.getColumnIndexOrThrow(COL_META_ARTIST))
+                ?.split(TrackMetadata.MULTIVALUE_SEP) ?: emptyList(),
+            album = cursor.getString(cursor.getColumnIndexOrThrow(COL_META_ALBUM))
+                ?: "Unknown Album",
+            albumId = cursor.getString(cursor.getColumnIndexOrThrow(COL_META_ALBUM_ID))
+                ?.let { UUID.fromString(it) },
+            durationMs = cursor.getLong(cursor.getColumnIndexOrThrow(COL_META_DURATION)),
+            sizeBytes = cursor.getLong(cursor.getColumnIndexOrThrow(COL_META_SIZE)),
+            mimeType = cursor.getString(cursor.getColumnIndexOrThrow(COL_META_MIME)) ?: "",
+            trackNumber = cursor.getInt(cursor.getColumnIndexOrThrow(COL_META_TRACK_NUM)),
+            discNumber = cursor.getInt(cursor.getColumnIndexOrThrow(COL_META_DISC_NUM)),
+            albumArtist = cursor.getString(cursor.getColumnIndexOrThrow(COL_META_ALBUM_ARTIST))
+                ?: "Unknown Album Artist",
+            dateModifiedMs = cursor.getString(
+                cursor.getColumnIndexOrThrow(
+                    COL_META_DATE_MODIFIED
+                )
+            )?.let { LocalDateTime.parse(it) },
+            dateCreated = cursor.getString(
+                cursor.getColumnIndexOrThrow(
+                    COL_META_DATE_CREATED
+                )
+            )?.let { LocalDateTime.parse(it) },
+            isFavourite = cursor.getInt(cursor.getColumnIndexOrThrow(COL_META_IS_FAVOURITE)) == 1,
+            numTracks = cursor.getInt(cursor.getColumnIndexOrThrow(COL_META_NUM_TRACKS)),
+            year = cursor.getInt(cursor.getColumnIndexOrThrow(COL_META_YEAR)),
+            genres = cursor.getString(cursor.getColumnIndexOrThrow(COL_META_GENRES))
+                ?.split(TrackMetadata.MULTIVALUE_SEP) ?: emptyList(),
+            lastFetched = cursor.getLong(cursor.getColumnIndexOrThrow(COL_LAST_FETCHED)),
+            lastAccessed = cursor.getLong(cursor.getColumnIndexOrThrow(COL_LAST_ACCESSED))
+        )
+    }
+
+    fun getMediaCacheRecord(trackId: UUID): MediaCacheRecord? {
+        val db = readableDatabase
+        return db.query(
+            TABLE_METADATA, arrayOf(
+                COL_META_ID,
+                COL_META_STATE,
+                COL_META_CHUNKS,
+                COL_META_SIZE,
+                COL_LAST_ACCESSED,
+            ), "$COL_META_ID = ?", arrayOf(trackId.toString()), null, null, null
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                val stateStr = cursor.getString(cursor.getColumnIndexOrThrow(COL_META_STATE))
+                val chunksBlob = cursor.getBlob(cursor.getColumnIndexOrThrow(COL_META_CHUNKS))
+                val sizeBytes = cursor.getLong(cursor.getColumnIndexOrThrow(COL_META_SIZE))
+                val lastAccessTime = cursor.getLong(cursor.getColumnIndexOrThrow(COL_LAST_ACCESSED))
+
+                // Create a 256-bit BitSet from the stored BLOB
+                val bitSet = if (chunksBlob == null) {
+                    BitSet(256)
+                } else {
+                    BitSet.valueOf(chunksBlob)
+                }
+
+                return MediaCacheRecord(
+                    id = trackId,
+                    state = ContentState.valueOf(stateStr),
+                    chunks = bitSet,
+                    sizeBytes = sizeBytes,
+                    lastAccessTime = lastAccessTime
+                )
             } else {
                 null
             }
         }
     }
 
-    fun getAllRecords(): List<MediaCacheRecord> {
-        val db = readableDatabase
-        val records = mutableListOf<MediaCacheRecord>()
-        db.query(TABLE_NAME, null, null, null, null, null, null).use { cursor ->
-            while (cursor.moveToNext()) {
-                records.add(mapCursorToRecord(cursor))
-            }
-        }
-        return records
-    }
-
     fun updateState(id: UUID, state: ContentState) {
         val db = writableDatabase
         val values = ContentValues().apply {
-            put(COL_STATE, state.name)
+            put(COL_META_STATE, state.name)
         }
-        db.update(TABLE_NAME, values, "$COL_ID = ?", arrayOf(id.toString()))
+
+        db.update(TABLE_METADATA, values, "$COL_META_ID = ?", arrayOf(id.toString()))
     }
 
     fun updateChunks(id: UUID, newChunks: BitSet) {
         val db = writableDatabase
         db.transaction {
-            val record = getRecord(id)
-            if (record != null) {
-                val currentChunks = record.getChunks()
-                currentChunks.or(newChunks)
-                val values = ContentValues().apply {
-                    put(COL_CHUNKS, currentChunks.toByteArray())
+            val currentChunks: BitSet? = query(
+                TABLE_METADATA,
+                arrayOf(COL_META_CHUNKS),
+                "$COL_META_ID = ?",
+                arrayOf(id.toString()),
+                null,
+                null,
+                null
+            ).use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val blob = cursor.getBlob(cursor.getColumnIndexOrThrow(COL_META_CHUNKS))
+                    val bitSet = if (blob == null) {
+                        BitSet(256)
+                    } else {
+                        BitSet.valueOf(blob)
+                    }
+
+                    bitSet
+                } else {
+                    null
                 }
-                update(TABLE_NAME, values, "$COL_ID = ?", arrayOf(id.toString()))
             }
+            if (currentChunks == null) {
+                return
+            }
+
+            currentChunks.or(newChunks)
+            val values = ContentValues().apply {
+                put(COL_META_CHUNKS, currentChunks.toByteArray())
+            }
+            update(TABLE_METADATA, values, "$COL_META_ID = ?", arrayOf(id.toString()))
         }
     }
 
     fun updateLastAccessTime(id: UUID, timeMs: Long) {
         val db = writableDatabase
         val values = ContentValues().apply {
-            put(COL_LAST_ACCESS_TIME, timeMs)
+            put(COL_LAST_ACCESSED, timeMs)
         }
-        db.update(TABLE_NAME, values, "$COL_ID = ?", arrayOf(id.toString()))
+        db.update(TABLE_METADATA, values, "$COL_META_ID = ?", arrayOf(id.toString()))
     }
 
-    fun updateSize(id: UUID, sizeBytes: Long) {
+    // Used when opened for streaming from web
+    fun markOpenedForStreaming(id: UUID) {
         val db = writableDatabase
-        val values = ContentValues().apply {
-            put(COL_SIZE_BYTES, sizeBytes)
+        db.transaction {
+            val lastFetched: Long? = query(
+                TABLE_METADATA,
+                arrayOf(COL_LAST_FETCHED),
+                "$COL_META_ID = ?",
+                arrayOf(id.toString()),
+                null,
+                null,
+                null
+            ).use { cursor ->
+                if (cursor.moveToFirst()) {
+                    cursor.getLong(cursor.getColumnIndexOrThrow(COL_LAST_FETCHED))
+                } else {
+                    null
+                }
+            }
+
+            val values = ContentValues().apply {
+                put(COL_META_ID, id.toString())
+                put(COL_META_STATE, ContentState.PARTIAL.name)
+                put(COL_META_CHUNKS, BitSet(256).toByteArray())
+            }
+
+            if (lastFetched == null) {
+                // We got a request to open this song because of the cache in poweramp,
+                // but we have no other data for it!
+                // Set this to 0 so it'll pull whenever poweramp tries to read it next.
+                values.put(COL_LAST_FETCHED, 0)
+            }
+
+            upsertData(id, values)
         }
-        db.update(TABLE_NAME, values, "$COL_ID = ?", arrayOf(id.toString()))
     }
 
-    fun deleteRecord(id: UUID) {
+
+    fun upsertData(id: UUID, values: ContentValues): Int {
         val db = writableDatabase
-        db.delete(TABLE_NAME, "$COL_ID = ?", arrayOf(id.toString()))
+        db.transaction {
+            val rowsAffected =
+                update(TABLE_METADATA, values, "$COL_META_ID = ?", arrayOf(id.toString()))
+
+            if (rowsAffected > 0) {
+                rowsAffected
+            } else {
+                if (!values.containsKey(COL_META_ID)) {
+                    values.put(COL_META_ID, id.toString())
+                }
+                // For a new row, ensure we have the NOT NULL timestamps
+                if (!values.containsKey(COL_LAST_FETCHED)) {
+                    values.put(COL_LAST_FETCHED, System.currentTimeMillis())
+                }
+                if (!values.containsKey(COL_LAST_ACCESSED)) {
+                    values.put(COL_LAST_ACCESSED, System.currentTimeMillis())
+                }
+
+                insert(TABLE_METADATA, null, values)
+            }
+        }
+
+        return 0
+    }
+
+    fun resetDatabase() {
+        val db = writableDatabase
+        db.execSQL("DROP TABLE IF EXISTS $TABLE_METADATA")
+        onCreate(db)
     }
 
     fun clearAll() {
         val db = writableDatabase
-        db.delete(TABLE_NAME, null, null)
-    }
-
-    private fun mapCursorToRecord(cursor: Cursor): MediaCacheRecord {
-        val idStr = cursor.getString(cursor.getColumnIndexOrThrow(COL_ID))
-        val typeStr = cursor.getString(cursor.getColumnIndexOrThrow(COL_TYPE))
-        val stateStr = cursor.getString(cursor.getColumnIndexOrThrow(COL_STATE))
-        val chunksBlob = cursor.getBlob(cursor.getColumnIndexOrThrow(COL_CHUNKS))
-        val sizeBytes = cursor.getLong(cursor.getColumnIndexOrThrow(COL_SIZE_BYTES))
-        val lastAccessTime = cursor.getLong(cursor.getColumnIndexOrThrow(COL_LAST_ACCESS_TIME))
-
-        // Create a 256-bit BitSet from the stored BLOB
-        val bitSet = BitSet.valueOf(chunksBlob)
-
-        return MediaCacheRecord(
-            id = UUID.fromString(idStr),
-            type = MediaType.valueOf(typeStr),
-            state = ContentState.valueOf(stateStr),
-            chunks = bitSet,
-            sizeBytes = sizeBytes,
-            lastAccessTime = lastAccessTime
-        )
+        db.delete(TABLE_METADATA, null, null)
     }
 }

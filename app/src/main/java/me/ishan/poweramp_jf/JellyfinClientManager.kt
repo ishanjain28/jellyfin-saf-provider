@@ -5,9 +5,6 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Point
 import android.os.Build
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
-import android.util.Base64
 import android.util.Log
 import androidx.core.content.edit
 import kotlinx.coroutines.Dispatchers
@@ -27,7 +24,6 @@ import org.jellyfin.sdk.api.client.extensions.userApi
 import org.jellyfin.sdk.api.client.extensions.userLibraryApi
 import org.jellyfin.sdk.createJellyfin
 import org.jellyfin.sdk.model.ClientInfo
-import org.jellyfin.sdk.model.DateTime
 import org.jellyfin.sdk.model.DeviceInfo
 import org.jellyfin.sdk.model.UUID
 import org.jellyfin.sdk.model.api.BaseItemDto
@@ -35,12 +31,7 @@ import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.ImageType
 import org.jellyfin.sdk.model.api.ItemFields
 import java.io.File
-import java.security.KeyStore
 import java.util.concurrent.TimeUnit
-import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
 
 class JellyfinClientManager(private val context: Context? = null) {
     private val cryptoManager = CryptoManager()
@@ -51,6 +42,7 @@ class JellyfinClientManager(private val context: Context? = null) {
     private val prefs: SharedPreferences? =
         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
+    private val db = MediaDatabaseHelper(context)
     private var jellyfin: Jellyfin? = null
     private var api: ApiClient? = null
     private var currentUserId: UUID? = null
@@ -67,7 +59,7 @@ class JellyfinClientManager(private val context: Context? = null) {
     }
 
     private fun initializeJellyfin() {
-        context?.let { ctx ->
+        context.let { ctx ->
             jellyfin = createJellyfin {
                 context = ctx
                 clientInfo = ClientInfo(
@@ -326,51 +318,53 @@ class JellyfinClientManager(private val context: Context? = null) {
     }
 
     /**
-     * Get single item by ID
+     * Get single track metadata by ID
      */
-    suspend fun getItem(itemId: UUID): BaseItemDto? = withContext(Dispatchers.IO) {
+    suspend fun getTrackMetadata(trackId: UUID): TrackMetadata? = withContext(Dispatchers.IO) {
         val apiClient = getApiClient() ?: return@withContext null
         val userId = currentUserId ?: return@withContext null
 
+        val meta = db.getCachedMetadata(trackId)
+        if (meta != null && !meta.isStale()) {
+            return@withContext meta
+        }
+
         try {
             val result = apiClient.userLibraryApi.getItem(
-                userId = userId, itemId = itemId
+                userId = userId, itemId = trackId
             )
-            result.content
+
+            val item = result.content
+            val metadata = TrackMetadata(
+                id = trackId,
+                title = item.name.orEmpty(),
+                artists = item.artists ?: emptyList(),
+                albumId = item.albumId,
+                album = item.album ?: "Unknown Album",
+                year = item.productionYear,
+                durationMs = item.runTimeTicks?.div(10000) ?: 0L,
+                sizeBytes = item.mediaSources?.firstOrNull()?.size ?: 0L,
+                genres = item.genres ?: emptyList<String>(),
+                trackNumber = item.indexNumber,
+                numTracks = item.indexNumberEnd,
+                discNumber = item.parentIndexNumber,
+                dateModifiedMs = item.dateCreated,
+                mimeType = "audio/${item.mediaSources?.firstOrNull()?.container ?: "mpeg"}",
+                albumArtist = item.albumArtist ?: "",
+                dateCreated = item.dateCreated,
+                isFavourite = item.userData?.isFavorite ?: false,
+            )
+
+            db.saveMetadata(metadata)
+
+            return@withContext metadata
         } catch (e: InvalidStatusException) {
-            Log.w(TAG, "getItem item=$itemId received ${e.status} code")
-            null
+            Log.w(TAG, "getItem item=$trackId received ${e.status} code, returning stale data")
+            meta
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to get item", e)
-            null
+            Log.e(TAG, "Failed to get item, returning stale data", e)
+            meta
         }
-    }
-
-    /**
-     * Get track metadata
-     */
-    suspend fun getTrackMetadata(trackId: UUID): TrackMetadata? = withContext(Dispatchers.IO) {
-        val item = getItem(trackId) ?: return@withContext null
-
-        TrackMetadata(
-            id = trackId,
-            title = item.name.orEmpty(),
-            artists = item.artists ?: emptyList(),
-            albumId = item.albumId,
-            album = item.album ?: "Unknown Album",
-            year = item.productionYear,
-            durationMs = item.runTimeTicks?.div(10000) ?: 0L,
-            sizeBytes = item.mediaSources?.firstOrNull()?.size ?: 0L,
-            genres = item.genres ?: emptyList<String>(),
-            trackNumber = item.indexNumber,
-            numTracks = item.indexNumberEnd,
-            discNumber = item.parentIndexNumber,
-            dateModifiedMs = item.dateCreated,
-            mimeType = "audio/${item.mediaSources?.firstOrNull()?.container ?: "mpeg"}",
-            albumArtist = item.albumArtist ?: "",
-            dateCreated = item.dateCreated,
-            isFavourite = item.userData?.isFavorite ?: false,
-        )
     }
 
     /**
@@ -474,8 +468,13 @@ class JellyfinClientManager(private val context: Context? = null) {
      * Download lyrics using SDK's lyrics API and format as LRC if synced
      */
     @SuppressLint("DefaultLocale")
-    suspend fun getLyrics(trackId: UUID): LyricsResult? {
+    suspend fun getLyrics(trackId: UUID): LyricsMetadata? {
         val apiClient = getApiClient() ?: return null
+
+        val data = db.getCachedLyrics(trackId)
+        if (data != null && !data.isStale()) {
+            return data
+        }
 
         return try {
             val response = apiClient.lyricsApi.getLyrics(trackId)
@@ -500,13 +499,17 @@ class JellyfinClientManager(private val context: Context? = null) {
                     sb.append(line.text).append("\n")
                 }
             }
-            LyricsResult(sb.toString(), isSynced)
+            val lyrics = sb.toString()
+
+            db.saveLyrics(trackId, lyrics, isSynced)
+
+            LyricsMetadata(trackId, lyrics, isSynced)
         } catch (e: InvalidStatusException) {
-            Log.w(TAG, "getLyrics track=$trackId received ${e.status} code")
-            null
+            Log.w(TAG, "getLyrics track=$trackId received ${e.status} code, returning stale data")
+            data
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to get lyrics for $trackId", e)
-            null
+            Log.e(TAG, "Failed to get lyrics for $trackId, returning stale data", e)
+            data
         }
     }
 
@@ -601,72 +604,3 @@ class JellyfinClientManager(private val context: Context? = null) {
         private const val KEY_MAX_CACHE_SIZE = "max_cache_size"
     }
 }
-
-class CryptoManager {
-    private val keyStore = KeyStore.getInstance("AndroidKeyStore").apply {
-        load(null)
-    }
-
-    private fun getKey(): SecretKey {
-        val existingKey = keyStore.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry
-        return existingKey?.secretKey ?: createKey()
-    }
-
-    private fun createKey(): SecretKey {
-        val keyGenerator =
-            KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-        keyGenerator.init(
-            KeyGenParameterSpec.Builder(
-                ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-            ).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build()
-        )
-        return keyGenerator.generateKey()
-    }
-
-    fun encrypt(data: String): String {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, getKey())
-        val iv = cipher.iv
-        val encrypted = cipher.doFinal(data.toByteArray())
-        val combined = ByteArray(iv.size + encrypted.size)
-        System.arraycopy(iv, 0, combined, 0, iv.size)
-        System.arraycopy(encrypted, 0, combined, iv.size, encrypted.size)
-        return Base64.encodeToString(combined, Base64.DEFAULT)
-    }
-
-    fun decrypt(data: String): String {
-        val combined = Base64.decode(data, Base64.DEFAULT)
-        val iv = combined.sliceArray(0 until 12)
-        val encrypted = combined.sliceArray(12 until combined.size)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, getKey(), GCMParameterSpec(128, iv))
-        return String(cipher.doFinal(encrypted))
-    }
-
-    companion object {
-        private const val ALIAS = "jellyfin_secret_key"
-    }
-}
-
-data class LyricsResult(val content: String, val isSynced: Boolean)
-
-data class TrackMetadata(
-    val id: UUID,
-    val title: String,
-    val artists: List<String>,
-    val album: String,
-    val albumId: UUID?,
-    val year: Int?,
-    val durationMs: Long,
-    val sizeBytes: Long,
-    val trackNumber: Int?,
-    val numTracks: Int?,
-    val discNumber: Int?,
-    val dateModifiedMs: DateTime?,
-    val mimeType: String,
-    val genres: List<String>,
-    val albumArtist: String,
-    val dateCreated: DateTime?,
-    val isFavourite: Boolean,
-)

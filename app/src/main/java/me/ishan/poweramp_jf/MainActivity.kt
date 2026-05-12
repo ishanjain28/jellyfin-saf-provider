@@ -41,7 +41,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import me.ishan.poweramp_jf.ui.theme.PowerampjfTheme
 
 class MainActivity : ComponentActivity() {
@@ -255,13 +257,18 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
 
         Button(
             onClick = {
-                // TODO
-                Toast.makeText(context, "Cache Cleared", Toast.LENGTH_SHORT).show()
+                scope.launch(Dispatchers.IO) {
+                    val dbHelper = MediaDatabaseHelper(context)
+                    dbHelper.resetDatabase()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Database Reset Successfully", Toast.LENGTH_SHORT).show()
+                    }
+                }
             },
             modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
         ) {
-            Text("Clear Cache")
+            Text("Reset Database & Clear Cache")
         }
     }
 }
