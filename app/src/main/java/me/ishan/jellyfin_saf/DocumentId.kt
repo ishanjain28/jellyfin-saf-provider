@@ -16,8 +16,8 @@ object DocumentId {
     // builders
     fun forRoot() = "jellyfin_root"
     fun forAlbum(albumId: UUID) = "$P_ALB$SEP$albumId"
-    fun forTrack(albumId: UUID, trackId: UUID, sizeBytes: Long) =
-        "$P_TRK$SEP$albumId$SEP$trackId$SEP$sizeBytes"
+    fun forTrack(albumId: UUID, trackId: UUID, sizeBytes: Long, durationMs: Long) =
+        "$P_TRK$SEP$albumId$SEP$trackId$SEP$sizeBytes$SEP$durationMs"
 
     fun forThumb(albumId: UUID) = "$P_THM$SEP$albumId"
     fun forLyrics(trackId: UUID) = "$P_LYR$SEP$trackId"
@@ -26,7 +26,10 @@ object DocumentId {
     sealed class Type {
         object Root : Type()
         data class Album(val albumId: UUID) : Type()
-        data class Track(val albumId: UUID, val trackId: UUID, val sizeBytes: Long) : Type()
+        data class Track(
+            val albumId: UUID, val trackId: UUID, val sizeBytes: Long, val durationMs: Long
+        ) : Type()
+
         data class Thumb(val albumId: UUID) : Type()
         data class Lyric(val trackId: UUID) : Type()
     }
@@ -41,7 +44,7 @@ object DocumentId {
             if (firstSep == -1) return null
 
             val prefix = id.substring(0, firstSep)
-            var rest = id.substring(firstSep + 1)
+            val rest = id.substring(firstSep + 1)
 
             return when (prefix) {
                 P_ALB -> Type.Album(UUID.fromString(rest))
@@ -51,14 +54,16 @@ object DocumentId {
                 P_LYR -> Type.Lyric(UUID.fromString(rest))
 
                 P_TRK -> {
-                    val secondSep = rest.indexOf(SEP)
-                    val albumId = UUID.fromString(rest.substring(0, secondSep))
-                    val rest = rest.substring(secondSep + 1)
-                    val thirdSep = rest.indexOf(SEP)
-                    val trackId = UUID.fromString(rest.substring(0, thirdSep))
-                    val sizeBytes = rest.substring(thirdSep + 1).toLong()
+                    val sep1 = rest.indexOf(SEP)
+                    val sep2 = rest.indexOf(SEP, sep1 + 1)
+                    val sep3 = rest.indexOf(SEP, sep2 + 1)
 
-                    Type.Track(albumId, trackId, sizeBytes)
+                    Type.Track(
+                        albumId = UUID.fromString(rest.substring(0, sep1)),
+                        trackId = UUID.fromString(rest.substring(sep1 + 1, sep2)),
+                        sizeBytes = rest.substring(sep2 + 1, sep3).toLong(),
+                        durationMs = rest.substring(sep3 + 1).toLong()
+                    )
                 }
 
                 else -> null

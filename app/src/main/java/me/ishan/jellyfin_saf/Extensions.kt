@@ -4,6 +4,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import java.nio.ByteBuffer
 import java.nio.channels.AsynchronousFileChannel
 import java.nio.channels.CompletionHandler
+import java.nio.channels.FileChannel
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -36,34 +37,30 @@ suspend fun AsynchronousFileChannel.writeSuspend(
 }
 
 
-suspend fun AsynchronousFileChannel.writeAt(
+fun FileChannel.writeAt(
     data: ByteArray, fileOffset: Long, bufferOffset: Int = 0, length: Int = data.size - bufferOffset
 ): Int {
     val buffer = ByteBuffer.wrap(data, bufferOffset, length)
     var totalWritten = 0
-    var currentOffset = fileOffset
 
     while (buffer.hasRemaining()) {
-        val written: Int = writeSuspend(buffer, currentOffset)
+        val written: Int = write(buffer, fileOffset + totalWritten)
         totalWritten += written
-        currentOffset += written
     }
 
     return totalWritten
 }
 
-suspend fun AsynchronousFileChannel.readAt(
+fun FileChannel.readAt(
     data: ByteArray, fileOffset: Long, bufferOffset: Int = 0, length: Int = data.size - bufferOffset
 ): Int {
     val buffer = ByteBuffer.wrap(data, bufferOffset, length)
     var totalRead = 0
-    var currentOffset = fileOffset
 
     while (buffer.hasRemaining()) {
-        val read = readSuspend(buffer, currentOffset)
+        val read = read(buffer, fileOffset + totalRead)
         if (read <= 0) break
         totalRead += read
-        currentOffset += read
     }
 
     return totalRead

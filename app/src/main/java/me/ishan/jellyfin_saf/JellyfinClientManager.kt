@@ -34,6 +34,7 @@ import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.ImageType
 import org.jellyfin.sdk.model.api.ItemFields
 import java.io.File
+import java.nio.channels.FileChannel
 import java.util.concurrent.TimeUnit
 
 class JellyfinClientManager(private val context: Context? = null) {
@@ -392,20 +393,17 @@ class JellyfinClientManager(private val context: Context? = null) {
      */
     suspend fun downloadTrack(
         trackId: UUID,
-        outputFile: RefCountedAsyncFileChannel,
+        outputFile: FileChannel,
         byteOffset: Long = 0L,
-        byteLength: Long = -1L,
-        onProgress: ((Long) -> Unit)? = null
+        onProgress: ((Long) -> Unit)? = null,
     ): Boolean = withContext(Dispatchers.IO) {
         val url = getStreamUrl(trackId) ?: return@withContext false
         val token = accessToken ?: return@withContext false
-        val channel = outputFile.acquire()
 
         try {
             val requestBuilder = Request.Builder().url(url).header("X-Emby-Token", token)
-            if (byteLength > 0) {
-                requestBuilder.header("Range", "bytes=$byteOffset-${byteOffset + byteLength - 1}")
-            }
+            // Always request to EOF for continuous streaming
+            requestBuilder.header("Range", "bytes=$byteOffset-")
 
             val call = httpClient.newCall(requestBuilder.build())
 
@@ -418,7 +416,10 @@ class JellyfinClientManager(private val context: Context? = null) {
 
             call.execute().use { response ->
                 if (!response.isSuccessful && response.code != 206) {
-                    Log.e(TAG, "Download failed with code: ${response.code}")
+                    Log.e(
+                        TAG,
+                        "[$trackId] Download failed: HTTP ${response.code} (offset=$byteOffset) (channelSize=${outputFile.size()})"
+                    )
                     return@withContext false
                 }
 
@@ -428,38 +429,35 @@ class JellyfinClientManager(private val context: Context? = null) {
                 var bytesRead: Int
                 var totalDownloaded = 0L
                 var lastProgressBoundary = 0L
-                val progressThreshold = 64 * 1024  // 64KB - Poweramp's typical read size
+                val progressThreshold = 512 * 1024  // 512KB
 
                 while (input.read(buffer).also { bytesRead = it } != -1) {
-                    channel.writeAt(buffer, byteOffset + totalDownloaded, 0, bytesRead)
+                    outputFile.writeAt(buffer, byteOffset + totalDownloaded, 0, bytesRead)
                     totalDownloaded += bytesRead
 
-                    // Only invoke progress callback when crossing 64KB boundaries
                     val currentBoundary = totalDownloaded / progressThreshold
                     if (currentBoundary > lastProgressBoundary) {
-                        onProgress?.invoke(byteOffset + totalDownloaded)
+                        onProgress?.invoke(totalDownloaded)
                         lastProgressBoundary = currentBoundary
                     }
                 }
 
                 // Final progress update to ensure we report completion
-                onProgress?.invoke(byteOffset + totalDownloaded)
+                onProgress?.invoke(totalDownloaded)
             }
             true
         } catch (e: InvalidStatusException) {
-            Log.w(
-                TAG,
-                "downloadTrack track=$trackId offset=$byteOffset length=$byteLength received ${e.status} code"
-            )
+            Log.w(TAG, "[$trackId] HTTP ${e.status} at offset $byteOffset")
             if (e.status == 401) {
                 accessToken = null
             }
             false
         } catch (e: Exception) {
-            Log.w(TAG, "Download ended for track $trackId: ${e.message}")
+            // log if it's not a cancellation
+            if (e !is java.util.concurrent.CancellationException) {
+                Log.d(TAG, "[$trackId] Download interrupted: ${e.message}")
+            }
             false
-        } finally {
-            outputFile.release()
         }
     }
 
