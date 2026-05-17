@@ -17,6 +17,7 @@ import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
 import java.util.BitSet
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.io.path.exists
 
 class SharedTrackState(val entry: MediaCacheRecord) {
 	@Volatile
@@ -122,7 +123,7 @@ class TrackStream(
 	fun close() {
 		if (isClosed) return
 		isClosed = true
-		Log.d(TAG, "[$trackId] Closing track stream $this. Waking up readers.")
+		Log.d(TAG, "[$trackId] Closing track stream ${this.hashCode()}. Waking up readers.")
 		activeDownload?.job?.cancel()
 		// Last reader can save state to disk
 		synchronized(waitLock) {
@@ -149,26 +150,27 @@ class TrackStream(
 		
 		val startChunk = (offset / MediaCacheRecord.CHUNK_SIZE).toInt()
 		val endChunk = ((offset + size - 1) / MediaCacheRecord.CHUNK_SIZE).toInt()
+		val totalChunks =
+			((entry.sizeBytes + MediaCacheRecord.CHUNK_SIZE - 1) / MediaCacheRecord.CHUNK_SIZE).toInt()
 		
 		// When to trigger downloads ?
 		// 1. If we don't have the data to serve the current request
 		// 2. If the buffer is running low, < LOW_BUFFER_SECONDS seconds left
 		val nextMissingDisk = sharedState.nextClearBitDisk(startChunk)
 		val nextMissingAny = sharedState.nextClearBitAny(startChunk)
-		val bufferedSecondsOnDisk =
-			secondsInBytes((nextMissingDisk - startChunk).toLong() * MediaCacheRecord.CHUNK_SIZE)
+		val bufferedSecondsAny =
+			secondsInBytes((nextMissingAny - startChunk).toLong() * MediaCacheRecord.CHUNK_SIZE)
+		val prefetchChunks =
+			(bytesInSeconds(PREFETCH_SECONDS) / MediaCacheRecord.CHUNK_SIZE).toInt()
+		val targetEndChunk = minOf(totalChunks - 1, nextMissingAny + prefetchChunks - 1)
 		
 		// Trigger a download if,
 		// 1. The chunk to serve this request is not on disk, nor in-flight
-		// 2. The buffer on disk is running lower than NUM_BUFFER_SECONDS
-		//    and there is no request to get it
-		if (nextMissingAny <= endChunk || (bufferedSecondsOnDisk <= LOW_BUFFER_SECONDS && nextMissingAny == nextMissingDisk)) {
+		// 2. The buffer on disk or in flight is running lower than NUM_BUFFER_SECONDS
+		//    and the new request will request additional data than what is in flight
+		if (nextMissingAny <= endChunk || (bufferedSecondsAny <= LOW_BUFFER_SECONDS && nextMissingAny <= targetEndChunk)) {
 			val currentDownload = activeDownload
-			val prefetchChunks =
-				(bytesInSeconds(PREFETCH_SECONDS) / MediaCacheRecord.CHUNK_SIZE).toInt()
-			val totalChunks =
-				((entry.sizeBytes + MediaCacheRecord.CHUNK_SIZE - 1) / MediaCacheRecord.CHUNK_SIZE).toInt()
-			val targetEndChunk = minOf(totalChunks - 1, nextMissingAny + prefetchChunks - 1)
+			
 			currentDownload?.job?.cancel()
 			if (currentDownload != null) {
 				sharedState.releaseChunks(
@@ -176,7 +178,10 @@ class TrackStream(
 				)
 				activeDownload = null
 			}
-			
+			Log.d(
+				TAG,
+				"Triggering Download: start=$nextMissingAny end=$targetEndChunk buffer=$bufferedSecondsAny requested_start=$startChunk requested_end=$endChunk"
+			)
 			downloadRange(nextMissingAny, targetEndChunk)
 		}
 		
@@ -219,7 +224,7 @@ class TrackStream(
 		
 		Log.i(
 			TAG,
-			"[$trackId] tid=${this.hashCode()} Download: asChunks=$alignedStartChunk aeChunk=$alignedEndChunk asOffset=$alignedStartOffset aeOffset=$alignedEndOffset"
+			"[$trackId] obj=${this.hashCode()} Download: asChunks=$alignedStartChunk aeChunk=$alignedEndChunk asOffset=$alignedStartOffset aeOffset=$alignedEndOffset"
 		)
 		
 		// Claim the chunks synchronously before yielding to the coroutine
@@ -366,6 +371,18 @@ class TrackPlaybackManager(
 		}
 		Log.i(TAG, "[$trackId] Stream opened")
 		return stream
+	}
+	
+	fun getCachedTrack(trackId: UUID): File? {
+		val entry = db.getMediaCacheRecord(trackId)
+		if (entry?.state() != ContentState.COMPLETE) {
+			return null
+		}
+		val path = File(tracksDir, "$trackId.cache").toPath()
+		if (!path.exists()) {
+			return null
+		}
+		return path.toFile()
 	}
 	
 	fun getCachedThumbnail(itemId: UUID): File? =

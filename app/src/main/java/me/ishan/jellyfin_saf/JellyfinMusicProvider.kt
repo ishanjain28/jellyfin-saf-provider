@@ -1,6 +1,7 @@
 package me.ishan.jellyfin_saf
 
 import android.content.Context
+import android.content.res.AssetFileDescriptor
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.graphics.Point
@@ -390,8 +391,17 @@ class JellyfinMusicProvider : DocumentsProvider() {
 			throw IOException("openDocument is not supported for any type except Tracks! type=$documentId")
 		}
 		
-		Log.d(TAG, "[${documentId.trackId}] Opening document")
+		playbackManager.getCachedTrack(documentId.trackId)?.let {
+			Log.d(TAG, "[${documentId.trackId}] Opening document from disk")
+			
+			val descriptor = (ParcelFileDescriptor.open(
+				it, ParcelFileDescriptor.MODE_READ_ONLY
+			))
+			
+			return AssetFileDescriptor(descriptor, 0, documentId.sizeBytes).parcelFileDescriptor
+		}
 		
+		Log.d(TAG, "[${documentId.trackId}] Opening document for streaming")
 		val trackStream = playbackManager.openTrackForStreaming(
 			documentId.trackId, documentId.sizeBytes, documentId.durationMs, jellyfinClient
 		)

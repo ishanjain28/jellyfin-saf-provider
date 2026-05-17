@@ -446,7 +446,10 @@ class JellyfinClientManager(private val context: Context? = null) {
 						
 						// return if canceled
 						if (!isActive) {
-							Log.d(TAG, "[$trackId] Download interrupted. read $totalDownloaded starting from $byteOffset")
+							Log.d(
+								TAG,
+								"[$trackId] Download interrupted. read $totalDownloaded starting from $byteOffset"
+							)
 							return@withContext
 						}
 					}
@@ -500,8 +503,8 @@ class JellyfinClientManager(private val context: Context? = null) {
 				maxHeight = sizeHint?.y ?: 1000,
 				quality = 90
 			)
-			
-			outputFile.writeBytes(response.content)
+			val data = response.content
+			outputFile.writeBytes(data)
 			true
 		} catch (e: InvalidStatusException) {
 			Log.w(TAG, "downloadAlbumArt item=$itemId sizeHint=$sizeHint received ${e.status} code")
@@ -569,9 +572,9 @@ class JellyfinClientManager(private val context: Context? = null) {
 		}
 	}
 
-//    /**
-//     * Report playback start using SDK
-//     */
+    /**
+     * Report playback start using SDK
+     */
 //    suspend fun reportPlaybackStart(
 //        trackId: UUID, canSeek: Boolean = true
 //    ) = withContext(Dispatchers.IO) {
@@ -592,8 +595,8 @@ class JellyfinClientManager(private val context: Context? = null) {
 //            Log.e(TAG, "Failed to report playback start", e)
 //        }
 //    }
-
-//    /**
+	
+	    /**
 //     * Report playback progress using SDK
 //     */
 //    suspend fun reportPlaybackProgress(
@@ -697,7 +700,6 @@ class JellyfinClientManager(private val context: Context? = null) {
 //			false
 //		}
 //	}
-	
 	private fun getDeviceId(): String {
 		val deviceId = prefs?.getString(KEY_DEVICE_ID, null) ?: run {
 			val id = UUID.randomUUID().toString()

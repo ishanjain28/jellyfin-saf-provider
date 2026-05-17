@@ -443,7 +443,7 @@ class MediaDatabaseHelper(context: Context?) :
 		)
 	}
 	
-	fun upsertData(id: UUID, values: ContentValues) {
+	private fun upsertData(id: UUID, values: ContentValues) {
 		val db = writableDatabase
 		db.transaction {
 			val rowsAffected =
