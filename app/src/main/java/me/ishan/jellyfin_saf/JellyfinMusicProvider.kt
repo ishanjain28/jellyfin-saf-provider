@@ -31,8 +31,11 @@ class JellyfinMusicProvider : DocumentsProvider() {
 	
 	private lateinit var jellyfinClient: JellyfinClientManager
 	private lateinit var playbackManager: TrackPlaybackManager
-	private lateinit var handlerThread: HandlerThread
 	private lateinit var db: MediaDatabaseHelper
+	
+	private val proxyThreads = mutableListOf<HandlerThread>()
+	private val proxyHandlers = mutableListOf<Handler>()
+	private val nextHandlerIndex = java.util.concurrent.atomic.AtomicInteger(0)
 	
 	companion object {
 		private const val TAG = "JellyfinMusicProvider"
@@ -90,10 +93,19 @@ class JellyfinMusicProvider : DocumentsProvider() {
 			
 			playbackManager = TrackPlaybackManagerSingleton.getInstance(context = ctx)
 			
-			handlerThread = HandlerThread("JellyfinSAFProxyThread")
-			handlerThread.start()
-			
 			db = DatabaseManager.getInstance(ctx)
+			
+			// Initialize proxy thread pool
+			synchronized(proxyThreads) {
+				if (proxyThreads.isEmpty()) {
+					for (i in 0 until 4) {
+						val thread = HandlerThread("JellyfinProxy-$i")
+						thread.start()
+						proxyThreads.add(thread)
+						proxyHandlers.add(Handler(thread.looper))
+					}
+				}
+			}
 			
 			Log.i(TAG, "JellyfinMusicProvider initialized with server: ${jellyfinClient.getUrl()}")
 			
@@ -425,16 +437,9 @@ class JellyfinMusicProvider : DocumentsProvider() {
 	): ParcelFileDescriptor {
 		val storageManager = context?.getSystemService(Context.STORAGE_SERVICE) as StorageManager
 		
-		synchronized(this) {
-			if (!handlerThread.isAlive) {
-				handlerThread = HandlerThread("JellyfinSAFProxyThread")
-				handlerThread.start()
-				Log.w(TAG, "HandlerThread was dead, recreated")
-			}
-		}
-		
-		val handler = Handler(handlerThread.looper)
-		Log.d(TAG, "[${documentId.trackId}] ProxyFD opened")
+		val index = nextHandlerIndex.getAndIncrement() % proxyHandlers.size
+		val handler = proxyHandlers[index]
+		Log.d(TAG, "[${documentId.trackId}] ProxyFD opened on thread $index")
 		
 		return storageManager.openProxyFileDescriptor(
 			ParcelFileDescriptor.MODE_READ_ONLY, object : ProxyFileDescriptorCallback() {
@@ -487,7 +492,11 @@ class JellyfinMusicProvider : DocumentsProvider() {
 	
 	override fun shutdown() {
 		playbackManager.shutdown()
-		handlerThread.quitSafely()
+		synchronized(proxyThreads) {
+			proxyThreads.forEach { it.quitSafely() }
+			proxyThreads.clear()
+			proxyHandlers.clear()
+		}
 		super.shutdown()
 	}
 	

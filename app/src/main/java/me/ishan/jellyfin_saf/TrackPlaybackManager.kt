@@ -124,27 +124,24 @@ class TrackStream(
 		if (isClosed) return
 		isClosed = true
 		Log.d(TAG, "[$trackId] Closing track stream ${this.hashCode()}. Waking up readers.")
-		activeDownload?.job?.cancel()
-		// Last reader can save state to disk
+		
 		synchronized(waitLock) {
-			if (sharedState.activeReaders == 1) {
-				try {
-					db.updateState(trackId, entry.chunks())
-				} catch (e: Exception) {
-					Log.w(TAG, "[$trackId] Failed to save state: ${e.message}")
-				}
-			}
-			
-			// Notify waitLock for the synchronous onRead() thread
 			waitLock.notifyAll()
 		}
+		activeDownload?.job?.cancel()
 		
-		onCloseCallback()
-		// Cancel all download jobs in our scope
-		scope.cancel()
+		// 3. Save state in the background without blocking this thread
+		if (sharedState.activeReaders == 1) {
+			try {
+				db.updateState(trackId, entry.chunks())
+			} catch (e: Exception) {
+				Log.w(TAG, "[$trackId] Failed to save state: ${e.message}")
+			}
+		}
 		channel.close()
+		scope.cancel()
+		onCloseCallback()
 	}
-	
 	
 	fun read(data: ByteArray, offset: Long, size: Int): Int {
 		if (isClosed || offset >= entry.sizeBytes) return 0
@@ -157,7 +154,6 @@ class TrackStream(
 		// When to trigger downloads ?
 		// 1. If we don't have the data to serve the current request
 		// 2. If the buffer is running low, < LOW_BUFFER_SECONDS seconds left
-		val nextMissingDisk = sharedState.nextClearBitDisk(startChunk)
 		val nextMissingAny = sharedState.nextClearBitAny(startChunk)
 		val bufferedSecondsAny =
 			secondsInBytes((nextMissingAny - startChunk).toLong() * MediaCacheRecord.CHUNK_SIZE)
@@ -495,8 +491,8 @@ object TrackPlaybackManagerSingleton {
 			val client = JellyfinClientManager(appContext)
 			TrackPlaybackManager(
 				File(
-				appContext.filesDir, "jellyfin_tracks"
-			).apply { mkdirs() },
+					appContext.filesDir, "jellyfin_tracks"
+				).apply { mkdirs() },
 				File(appContext.cacheDir, "jellyfin_thumbs").apply { mkdirs() },
 				DatabaseManager.getInstance(appContext),
 				appContext.getDatabasePath("jellyfin_media_cache.db"),
