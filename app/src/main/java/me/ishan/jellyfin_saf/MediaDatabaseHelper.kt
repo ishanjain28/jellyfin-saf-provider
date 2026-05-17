@@ -6,11 +6,13 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.os.StrictMode
+import android.util.Log
 import kotlinx.serialization.Serializable
 import org.jellyfin.sdk.model.UUID
 import java.io.File
 import java.util.BitSet
 import androidx.core.database.sqlite.transaction
+import me.ishan.jellyfin_saf.TrackStream.Companion.TAG
 import org.jellyfin.sdk.model.DateTime
 import java.time.LocalDateTime
 
@@ -34,22 +36,13 @@ data class MediaCacheRecord(
 		return chunks
 	}
 	
-	fun totalChunks(): Int {
-		return ((sizeBytes + CHUNK_SIZE - 1) / CHUNK_SIZE).toInt()
-	}
-	
 	// Perform the bitwise or operation chunks | updatedChunks
 	fun state(): ContentState {
 		return state
 	}
 	
-	// Perform the bitwise or operation chunks | updatedChunks
-	fun updateState(newState: ContentState) {
-		state = newState
-	}
-	
 	companion object {
-		const val CHUNK_SIZE: Long = 512 * 1024 // 512KiB
+		const val CHUNK_SIZE: Long = 256 * 1024 // 256KiB
 	}
 }
 
@@ -237,8 +230,8 @@ class MediaDatabaseHelper(context: Context?) :
 			put(COL_META_TRACK_NUM, metadata.trackNumber)
 			put(COL_META_DISC_NUM, metadata.discNumber)
 			put(COL_META_ALBUM_ARTIST, metadata.albumArtist)
-			put(COL_META_DATE_MODIFIED, metadata.dateModifiedMs.toString())
-			put(COL_META_DATE_CREATED, metadata.dateCreated.toString())
+			put(COL_META_DATE_MODIFIED, metadata.dateModifiedMs?.toString())
+			put(COL_META_DATE_CREATED, metadata.dateCreated?.toString())
 			put(COL_META_IS_FAVOURITE, metadata.isFavourite)
 			put(COL_META_NUM_TRACKS, metadata.numTracks)
 			put(COL_META_YEAR, metadata.year)
@@ -363,10 +356,7 @@ class MediaDatabaseHelper(context: Context?) :
 		
 		db.query(
 			TABLE_METADATA, arrayOf(
-				COL_META_STATE,
-				COL_META_CHUNKS,
-				COL_META_SIZE,
-				COL_META_DURATION,
+				COL_META_STATE, COL_META_CHUNKS, COL_META_SIZE, COL_META_DURATION
 			), "$COL_META_ID = ?", arrayOf(trackId.toString()), null, null, null
 		).use { cursor ->
 			if (!cursor.moveToFirst()) return null
@@ -383,56 +373,55 @@ class MediaDatabaseHelper(context: Context?) :
 				state = ContentState.valueOf(stateStr),
 				chunks = bitSet,
 				sizeBytes = sizeBytes,
-				durationMs = durationMs
+				durationMs = durationMs,
 			)
 		}
 	}
 	
-	fun updateState(id: UUID, state: ContentState, newChunks: BitSet) {
+	fun updateState(id: UUID, newChunks: BitSet) {
 		val db = writableDatabase
+		
 		db.transaction {
-			val currentChunks: BitSet = query(
+			query(
 				TABLE_METADATA,
-				arrayOf(COL_META_CHUNKS),
+				arrayOf(COL_META_CHUNKS, COL_META_SIZE),
 				"$COL_META_ID = ?",
 				arrayOf(id.toString()),
 				null,
 				null,
 				null
 			).use { cursor ->
-				if (!cursor.moveToFirst()) return@use BitSet()
+				val bitset = if (!cursor.moveToFirst()) return@use BitSet() else {
+					val blob = cursor.getBlob(cursor.getColumnIndexOrThrow(COL_META_CHUNKS))
+					if (blob != null) BitSet.valueOf(blob) else BitSet()
+				}
+				val size = cursor.getLong(cursor.getColumnIndexOrThrow(COL_META_SIZE))
 				
-				val blob = cursor.getBlob(cursor.getColumnIndexOrThrow(COL_META_CHUNKS))
+				val totalChunks =
+					(size + MediaCacheRecord.CHUNK_SIZE - 1) / MediaCacheRecord.CHUNK_SIZE
 				
-				if (blob != null) BitSet.valueOf(blob) else BitSet()
+				bitset.or(newChunks)
+				val newState =
+					if (bitset.cardinality() >= totalChunks) ContentState.COMPLETE else ContentState.PARTIAL
+				
+				if (newState == ContentState.COMPLETE) {
+					Log.i(TAG, "[$id] Download complete (${bitset.cardinality()}/$totalChunks)")
+				}
+				
+				val values = ContentValues().apply {
+					put(COL_META_CHUNKS, bitset.toByteArray())
+					put(COL_META_STATE, newState.name)
+				}
+				
+				update(TABLE_METADATA, values, "$COL_META_ID = ?", arrayOf(id.toString()))
 			}
-			
-			currentChunks.or(newChunks)
-			val values = ContentValues().apply {
-				put(COL_META_CHUNKS, currentChunks.toByteArray())
-				put(COL_META_STATE, state.name)
-			}
-			update(TABLE_METADATA, values, "$COL_META_ID = ?", arrayOf(id.toString()))
 		}
 	}
 	
 	// Used when opened for streaming from web
 	fun markOpenedForStreaming(id: UUID, sizeBytes: Long, durationMs: Long): MediaCacheRecord {
 		val existing = getMediaCacheRecord(id)
-		if (existing != null) {
-			// Update size/duration if they were 0 (placeholder record)
-			if (existing.sizeBytes == 0L || existing.durationMs == 0L) {
-				val values = ContentValues().apply {
-					put(COL_META_SIZE, sizeBytes)
-					put(COL_META_DURATION, durationMs)
-				}
-				upsertData(id, values)
-				return MediaCacheRecord(
-					id, existing.state(), existing.chunks(), sizeBytes, durationMs
-				)
-			}
-			return existing
-		}
+		if (existing != null) return existing
 		
 		// New record - initialize with empty chunks but correct size/duration
 		val values = ContentValues().apply {
@@ -450,26 +439,26 @@ class MediaDatabaseHelper(context: Context?) :
 			state = ContentState.PARTIAL,
 			chunks = BitSet(),
 			sizeBytes = sizeBytes,
-			durationMs = durationMs
+			durationMs = durationMs,
 		)
 	}
 	
 	fun upsertData(id: UUID, values: ContentValues) {
 		val db = writableDatabase
-		return db.transaction {
+		db.transaction {
 			val rowsAffected =
 				update(TABLE_METADATA, values, "$COL_META_ID = ?", arrayOf(id.toString()))
-			if (rowsAffected > 0) return
-			
-			if (!values.containsKey(COL_META_ID)) {
-				values.put(COL_META_ID, id.toString())
+			if (rowsAffected == 0) {
+				if (!values.containsKey(COL_META_ID)) {
+					values.put(COL_META_ID, id.toString())
+				}
+				// For a new row, ensure we have the NOT NULL timestamps
+				if (!values.containsKey(COL_LAST_FETCHED)) {
+					values.put(COL_LAST_FETCHED, System.currentTimeMillis())
+				}
+				
+				insert(TABLE_METADATA, null, values)
 			}
-			// For a new row, ensure we have the NOT NULL timestamps
-			if (!values.containsKey(COL_LAST_FETCHED)) {
-				values.put(COL_LAST_FETCHED, System.currentTimeMillis())
-			}
-			
-			insert(TABLE_METADATA, null, values)
 		}
 	}
 	
@@ -579,7 +568,11 @@ class MediaDatabaseHelper(context: Context?) :
 		db.query(
 			TABLE_METADATA,
 			arrayOf(
-				COL_META_ID, COL_META_STATE, COL_META_CHUNKS, COL_META_SIZE, COL_META_DURATION
+				COL_META_ID,
+				COL_META_STATE,
+				COL_META_CHUNKS,
+				COL_META_SIZE,
+				COL_META_DURATION
 			),
 			selection, null, null, null, null,
 		).use { cursor ->
@@ -589,7 +582,6 @@ class MediaDatabaseHelper(context: Context?) :
 				val chunksBlob = cursor.getBlob(cursor.getColumnIndexOrThrow(COL_META_CHUNKS))
 				val sizeBytes = cursor.getLong(cursor.getColumnIndexOrThrow(COL_META_SIZE))
 				val durationMs = cursor.getLong(cursor.getColumnIndexOrThrow(COL_META_DURATION))
-				
 				val bitSet = if (chunksBlob == null) BitSet() else BitSet.valueOf(chunksBlob)
 				
 				records.add(

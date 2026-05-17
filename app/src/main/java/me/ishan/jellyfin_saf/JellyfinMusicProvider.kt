@@ -182,7 +182,7 @@ class JellyfinMusicProvider : DocumentsProvider() {
 						)
 						add(DocumentsContract.Document.COLUMN_SIZE, metadata.sizeBytes)
 						add(
-							DocumentsContract.Document.COLUMN_LAST_MODIFIED, metadata.dateModifiedMs
+							DocumentsContract.Document.COLUMN_LAST_MODIFIED, metadata.lastFetched
 						)
 						add(
 							DocumentsContract.Document.COLUMN_FLAGS,
@@ -315,7 +315,7 @@ class JellyfinMusicProvider : DocumentsProvider() {
 							add(DocumentsContract.Document.COLUMN_SIZE, metadata.sizeBytes)
 							add(
 								DocumentsContract.Document.COLUMN_LAST_MODIFIED,
-								metadata.dateModifiedMs
+								metadata.lastFetched
 							)
 							add(
 								DocumentsContract.Document.COLUMN_FLAGS,
@@ -395,33 +395,15 @@ class JellyfinMusicProvider : DocumentsProvider() {
 		val trackStream = playbackManager.openTrackForStreaming(
 			documentId.trackId, documentId.sizeBytes, documentId.durationMs, jellyfinClient
 		)
-		
 		signal?.setOnCancelListener {
-			Log.d(TAG, "[${documentId.trackId}] CancellationSignal fired during openDocument")
-			// Don't call close() - onRelease will handle that
-			// But remove from active tracks so it won't be reused
+			Log.d(
+				TAG, "[${documentId.trackId}] CancellationSignal fired during openDocument"
+			)
 			trackStream.close()
-			playbackManager.releaseTrackStream(documentId.trackId)
-		}
-		
-		// Start track download and EOF metadata download immediately
-		trackStream.fetchEOFMetadata()
-		trackStream.startSequentialDownload()
-		
-		runBlocking {
-			withTimeoutOrNull(5000) {
-				trackStream.waitForFirstChunk()
-			} ?: run {
-				Log.w(
-					TAG,
-					"[${documentId.trackId}] Initial buffer timeout after 5s, proceeding anyway"
-				)
-			}
 		}
 		
 		if (signal?.isCanceled == true) {
 			trackStream.close()
-			playbackManager.releaseTrackStream(documentId.trackId)
 			throw OperationCanceledException("received cancellation signal")
 		}
 		
@@ -451,10 +433,10 @@ class JellyfinMusicProvider : DocumentsProvider() {
 				override fun onRead(offset: Long, size: Int, data: ByteArray): Int =
 					trackStream.read(data, offset, size)
 				
+				
 				override fun onRelease() {
 					Log.d(TAG, "[${documentId.trackId}] ProxyFD released")
 					trackStream.close()
-					playbackManager.releaseTrackStream(documentId.trackId)
 				}
 			}, handler
 		)
