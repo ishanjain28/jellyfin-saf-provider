@@ -73,7 +73,7 @@ class JellyfinClientManager(private val context: Context? = null) {
 			jellyfin = createJellyfin {
 				context = ctx
 				clientInfo = ClientInfo(
-					name = "Android Jellyfin Provider", version = "0.0.2"
+					name = "Android Jellyfin Provider", version = "0.0.3"
 				)
 				deviceInfo = DeviceInfo(
 					id = getDeviceId(), name = Build.MODEL

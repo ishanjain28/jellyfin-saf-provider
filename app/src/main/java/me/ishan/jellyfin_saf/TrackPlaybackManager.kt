@@ -142,6 +142,7 @@ class TrackStream(
 		onCloseCallback()
 		// Cancel all download jobs in our scope
 		scope.cancel()
+		channel.close()
 	}
 	
 	
