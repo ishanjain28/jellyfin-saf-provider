@@ -21,6 +21,9 @@
 #-renamesourcefileattribute SourceFile
 
 # Remove verbbose/debug logs
+-dontwarn org.slf4j.spi.CallerBoundaryAware
+-dontwarn org.slf4j.spi.LoggingEventBuilder
+-dontwarn io.github.oshai.kotlinlogging.**
 -assumenosideeffects class android.util.Log {
     public static *** d(...);
     public static *** v(...);
