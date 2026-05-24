@@ -97,9 +97,6 @@ fun JellyfinSettings(modifier: Modifier = Modifier) {
 		scanProgress = "Starting scan..."
 		scope.launch(Dispatchers.IO) {
 			try {
-				val db = AppDatabase.getDatabase(context)
-				db.trackDao().deleteAllMetadata()
-				
 				val albums = manager.getAlbums(limit = 100000)
 				var tracksScanned = 0
 				for ((index, album) in albums.withIndex()) {

@@ -18,6 +18,8 @@ import me.ishan.jellyfin_saf.db.TrackLyricsEntity
 import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okio.buffer
+import okio.sink
 import org.jellyfin.sdk.Jellyfin
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.exception.InvalidStatusException
@@ -47,9 +49,15 @@ import kotlin.io.path.extension
 class JellyfinClientManager(private val context: Context? = null) {
 	private val cryptoManager = CryptoManager()
 	
-	private val httpClient = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS)
-		.readTimeout(20, TimeUnit.SECONDS).writeTimeout(15, TimeUnit.SECONDS)
-		.callTimeout(60, TimeUnit.SECONDS).connectionPool(
+	private val httpClient = OkHttpClient.Builder().addInterceptor { chain ->
+		return@addInterceptor chain.proceed(
+			chain.request().newBuilder().header(
+				"User-Agent",
+				"${context?.getString(R.string.app_name)}/${context?.getString(R.string.app_version)} via okhttp/${okhttp3.OkHttp.VERSION}"
+			).build()
+		)
+	}.connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
+		.writeTimeout(15, TimeUnit.SECONDS).callTimeout(60, TimeUnit.SECONDS).connectionPool(
 			ConnectionPool(
 				maxIdleConnections = 5, keepAliveDuration = 5, TimeUnit.MINUTES
 			)
@@ -79,7 +87,8 @@ class JellyfinClientManager(private val context: Context? = null) {
 			jellyfin = createJellyfin {
 				context = ctx
 				clientInfo = ClientInfo(
-					name = "Android Jellyfin Provider", version = "0.0.4"
+					name = context?.getString(R.string.app_name) ?: "Android Jellyfin Provider",
+					version = context?.getString(R.string.app_version) ?: "0.0.1"
 				)
 				deviceInfo = DeviceInfo(
 					id = getDeviceId(), name = Build.MODEL
@@ -514,7 +523,7 @@ class JellyfinClientManager(private val context: Context? = null) {
 				accessToken = null
 			}
 		} catch (e: Exception) {
-			// log if it's not a cancellation
+			// log exception
 			if (e !is java.util.concurrent.CancellationException) {
 				Log.d(TAG, "[$trackId] Download interrupted: ${e.message}")
 			}
@@ -542,21 +551,37 @@ class JellyfinClientManager(private val context: Context? = null) {
 		itemId: UUID, outputFile: File, sizeHint: Point?,
 	): Boolean = withContext(Dispatchers.IO) {
 		val apiClient = getApiClient() ?: return@withContext false
-		
 		// Use SDK's image API
+		val url = apiClient.imageApi.getItemImageUrl(
+			itemId = itemId,
+			imageType = ImageType.PRIMARY,
+			maxWidth = sizeHint?.x ?: 1000,
+			maxHeight = sizeHint?.y ?: 1000,
+			quality = 90,
+		)
+		val token = accessToken ?: return@withContext false
+		
 		try {
-			val response = apiClient.imageApi.getItemImage(
-				itemId = itemId,
-				imageType = ImageType.PRIMARY,
-				maxWidth = sizeHint?.x ?: 1000,
-				maxHeight = sizeHint?.y ?: 1000,
-				quality = 90
-			)
-			val data = response.content
-			outputFile.writeBytes(data)
-			true
+			val requestBuilder = Request.Builder().url(url).header("X-Emby-Token", token)
+			
+			val call = httpClient.newCall(requestBuilder.build())
+			call.execute().use { response ->
+				if (!response.isSuccessful) {
+					return@withContext false
+				}
+				
+				response.body.source().use { source ->
+					outputFile.sink().buffer().use { sink ->
+						sink.writeAll(source)
+						return@withContext true
+					}
+				}
+			}
 		} catch (e: InvalidStatusException) {
-			Log.w(TAG, "downloadAlbumArt item=$itemId sizeHint=$sizeHint received ${e.status} code")
+			Log.w(
+				TAG,
+				"downloadAlbumArt item=$itemId sizeHint=$sizeHint received ${e.status} code"
+			)
 			if (e.status == 401) {
 				accessToken = null
 			}
@@ -611,7 +636,9 @@ class JellyfinClientManager(private val context: Context? = null) {
 			
 			entity
 		} catch (e: InvalidStatusException) {
-			Log.w(TAG, "getLyrics track=$trackId received ${e.status} code, returning stale data")
+			Log.w(
+				TAG, "getLyrics track=$trackId received ${e.status} code, returning stale data"
+			)
 			if (e.status == 401) {
 				accessToken = null
 			}

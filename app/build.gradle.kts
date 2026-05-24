@@ -12,13 +12,16 @@ android {
 			minorApiLevel = 1
 		}
 	}
+	buildFeatures {
+		resValues = true
+	}
 	
 	defaultConfig {
 		applicationId = "me.ishan.jellyfin_saf"
 		minSdk = 26
 		targetSdk = 36
-		versionCode = 1
-		versionName = "0.1"
+		versionName = "0.0.5"
+		versionCode = 5
 		
 		testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 	}
@@ -30,6 +33,11 @@ android {
 				getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
 			)
 			signingConfig = signingConfigs.getByName("debug")
+			resValue("string", "app_version", "${defaultConfig.versionName}")
+		}
+		debug {
+			versionNameSuffix = "-debug"
+			resValue("string", "app_version", "${defaultConfig.versionName}-debug")
 		}
 	}
 	compileOptions {
