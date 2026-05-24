@@ -13,5 +13,4 @@ This is not published on Play Store yet. You can grab the latest APK from [relea
 
 # Screenshots
 
-#![Main Activity](static/MainActivity.png)
-
+<img src="static/MainActivity.png" alt="Main Activity" width="200"/>
