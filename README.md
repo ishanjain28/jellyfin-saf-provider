@@ -13,5 +13,9 @@ This is not published on Play Store yet. You can grab the latest APK from [relea
 
 # Screenshots
 
-<img src="static/MainActivity.png" alt="Main Activity" width="200"/>
-<img src="static/MainActivity2.png" alt="Main Activity2" width="200"/>
+<table>
+    <tr>
+        <td><img src="static/MainActivity.png" alt="Main Activity" width="200"/></td>
+        <td><img src="static/MainActivity2.png" alt="Main Activity2" width="200"/></td>
+    </tr>
+</table>
