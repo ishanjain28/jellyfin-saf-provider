@@ -6,11 +6,15 @@ import android.content.SharedPreferences
 import android.graphics.Point
 import android.os.Build
 import android.util.Log
+import android.webkit.MimeTypeMap
 import androidx.core.content.edit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import me.ishan.jellyfin_saf.db.AppDatabase
+import me.ishan.jellyfin_saf.db.TrackEntity
+import me.ishan.jellyfin_saf.db.TrackLyricsEntity
 import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -37,6 +41,8 @@ import org.jellyfin.sdk.model.api.ItemFields
 import java.io.File
 import java.nio.channels.FileChannel
 import java.util.concurrent.TimeUnit
+import kotlin.io.path.Path
+import kotlin.io.path.extension
 
 class JellyfinClientManager(private val context: Context? = null) {
 	private val cryptoManager = CryptoManager()
@@ -52,7 +58,7 @@ class JellyfinClientManager(private val context: Context? = null) {
 	private val prefs: SharedPreferences? =
 		context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 	
-	private val db = DatabaseManager.getInstance(context)
+	private val db = context?.let { AppDatabase.getDatabase(it) }
 	private var jellyfin: Jellyfin? = null
 	private var api: ApiClient? = null
 	private var currentUserId: UUID? = null
@@ -274,6 +280,37 @@ class JellyfinClientManager(private val context: Context? = null) {
 	}
 	
 	/**
+	 * Get library stats (total albums, total tracks)
+	 */
+	suspend fun getLibraryStats(): Pair<Int, Int> = withContext(Dispatchers.IO) {
+		val apiClient = getApiClient() ?: return@withContext 0 to 0
+		val userId = currentUserId ?: return@withContext 0 to 0
+		
+		try {
+			val albumsResult = apiClient.itemsApi.getItems(
+				userId = userId,
+				includeItemTypes = setOf(BaseItemKind.MUSIC_ALBUM),
+				recursive = true,
+				limit = 1
+			)
+			val tracksResult = apiClient.itemsApi.getItems(
+				userId = userId,
+				includeItemTypes = setOf(BaseItemKind.AUDIO),
+				recursive = true,
+				limit = 1
+			)
+			
+			val totalAlbums = albumsResult.content.totalRecordCount
+			val totalTracks = tracksResult.content.totalRecordCount
+			
+			totalAlbums to totalTracks
+		} catch (e: Exception) {
+			Log.e(TAG, "Failed to get library stats", e)
+			0 to 0
+		}
+	}
+	
+	/**
 	 * Get albums from library
 	 */
 	suspend fun getAlbums(
@@ -337,12 +374,14 @@ class JellyfinClientManager(private val context: Context? = null) {
 	/**
 	 * Get single track metadata by ID
 	 */
-	suspend fun getTrackMetadata(trackId: UUID): TrackMetadata? = withContext(Dispatchers.IO) {
+	suspend fun getTrackMetadata(trackId: UUID): TrackEntity? = withContext(Dispatchers.IO) {
 		val apiClient = getApiClient() ?: return@withContext null
 		val userId = currentUserId ?: return@withContext null
 		
-		val meta = db.getCachedMetadata(trackId)
-		if (meta != null && !meta.isStale()) {
+		val meta = db?.trackDao()?.getTrackById(trackId)
+		val isStale =
+			meta == null || (System.currentTimeMillis() - meta.lastFetched) >= 2 * 24 * 60 * 60 * 1000L
+		if (meta != null && !isStale) {
 			return@withContext meta
 		}
 		
@@ -352,29 +391,39 @@ class JellyfinClientManager(private val context: Context? = null) {
 			)
 			
 			val item = result.content
-			val metadata = TrackMetadata(
+			
+			val mimeType = if (item.path != null) {
+				val ext = Path(item.path!!).extension
+				MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "audio/$ext"
+			} else {
+				// default fallback
+				"audio/mp3"
+			}
+			
+			val entity = TrackEntity(
 				id = trackId,
 				title = item.name.orEmpty(),
-				artists = item.artists ?: emptyList(),
+				artist = item.artists?.joinToString(";"),
 				albumId = item.albumId,
 				album = item.album ?: "Unknown Album",
 				year = item.productionYear,
-				durationMs = item.runTimeTicks?.div(10000) ?: 0L,
-				sizeBytes = item.mediaSources?.firstOrNull()?.size ?: 0L,
-				genres = item.genres ?: emptyList(),
+				duration = item.runTimeTicks?.div(10000) ?: 0L,
+				size = item.mediaSources?.firstOrNull()?.size ?: 0L,
+				genres = item.genres?.joinToString(";"),
 				trackNumber = item.indexNumber,
-				numTracks = item.indexNumberEnd,
+				numTracks = item.indexNumberEnd ?: 0,
 				discNumber = item.parentIndexNumber,
-				dateModifiedMs = item.dateCreated,
-				mimeType = "audio/${item.container ?: "mpeg"}",
+				dateModified = item.dateCreated?.toString(),
+				mimeType = mimeType,
 				albumArtist = item.albumArtist ?: "",
-				dateCreated = item.dateCreated,
+				dateCreated = item.dateCreated?.toString(),
 				isFavourite = item.userData?.isFavorite ?: false,
+				lastFetched = System.currentTimeMillis()
 			)
 			
-			db.saveMetadata(metadata)
+			db?.trackDao()?.insertTrack(entity)
 			
-			return@withContext metadata
+			return@withContext entity
 		} catch (e: InvalidStatusException) {
 			Log.w(TAG, "getItem item=$trackId received ${e.status} code, returning stale data")
 			if (e.status == 401) {
@@ -524,10 +573,10 @@ class JellyfinClientManager(private val context: Context? = null) {
 	 * Download lyrics using SDK's lyrics API and format as LRC if synced
 	 */
 	@SuppressLint("DefaultLocale")
-	suspend fun getLyrics(trackId: UUID): LyricsMetadata? {
+	suspend fun getLyrics(trackId: UUID): TrackLyricsEntity? {
 		val apiClient = getApiClient() ?: return null
 		
-		val data = db.getCachedLyrics(trackId)
+		val data = db?.trackDao()?.getTrackLyricsById(trackId)
 		if (data != null && !data.isStale()) {
 			return data
 		}
@@ -557,9 +606,10 @@ class JellyfinClientManager(private val context: Context? = null) {
 			}
 			val lyrics = sb.toString()
 			
-			db.saveLyrics(trackId, lyrics, isSynced)
+			val entity = TrackLyricsEntity(trackId, lyrics, isSynced, System.currentTimeMillis())
+			db?.trackDao()?.insertTrackLyrics(entity)
 			
-			LyricsMetadata(trackId, lyrics, isSynced)
+			entity
 		} catch (e: InvalidStatusException) {
 			Log.w(TAG, "getLyrics track=$trackId received ${e.status} code, returning stale data")
 			if (e.status == 401) {
@@ -571,10 +621,10 @@ class JellyfinClientManager(private val context: Context? = null) {
 			data
 		}
 	}
-
-    /**
-     * Report playback start using SDK
-     */
+	
+	/**
+	 * Report playback start using SDK
+	 */
 //    suspend fun reportPlaybackStart(
 //        trackId: UUID, canSeek: Boolean = true
 //    ) = withContext(Dispatchers.IO) {
@@ -596,9 +646,9 @@ class JellyfinClientManager(private val context: Context? = null) {
 //        }
 //    }
 	
-	    /**
-//     * Report playback progress using SDK
-//     */
+	/**
+	//     * Report playback progress using SDK
+	//     */
 //    suspend fun reportPlaybackProgress(
 //        trackId: UUID, positionTicks: Long, isPaused: Boolean = false, isMuted: Boolean = false
 //    ) = withContext(Dispatchers.IO) {

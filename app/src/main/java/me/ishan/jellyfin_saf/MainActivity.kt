@@ -47,442 +47,542 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import me.ishan.jellyfin_saf.db.AppDatabase
 import me.ishan.jellyfin_saf.ui.theme.JellyfinSaf
 
 class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        // TODO: remove later ?
-        StrictMode.setVmPolicy(
-            StrictMode.VmPolicy.Builder()
-                .detectLeakedClosableObjects()
-                .penaltyLog()
-                .penaltyDropBox()
-                .build()
-        )
-
-        super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        setContent {
-            JellyfinSaf {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    JellyfinSettings(
-                        modifier = Modifier.padding(innerPadding)
-                    )
-                }
-            }
-        }
-    }
+	override fun onCreate(savedInstanceState: Bundle?) {
+		// TODO: remove later ?
+		StrictMode.setVmPolicy(
+			StrictMode.VmPolicy.Builder().detectLeakedClosableObjects().penaltyLog()
+				.penaltyDropBox().build()
+		)
+		
+		super.onCreate(savedInstanceState)
+		enableEdgeToEdge()
+		setContent {
+			JellyfinSaf {
+				Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+					JellyfinSettings(
+						modifier = Modifier.padding(innerPadding)
+					)
+				}
+			}
+		}
+	}
 }
 
 @SuppressLint("DefaultLocale")
 @Composable
 fun JellyfinSettings(modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    val manager = remember { JellyfinClientManager(context) }
-    val playbackManager = remember { TrackPlaybackManagerSingleton.getInstance(context) }
-    val scope = rememberCoroutineScope()
-
-    var url by remember { mutableStateOf(manager.getUrl()) }
-    var username by remember { mutableStateOf(manager.getUsername()) }
-    var password by remember { mutableStateOf(manager.getPassword()) }
-    var maxCacheSize by remember { mutableStateOf(manager.getMaxCacheSize().toString()) }
-    var isLoading by remember { mutableStateOf(false) }
-    var isAuthenticated by remember { mutableStateOf(manager.isAuthenticated()) }
-    var cacheBreakdown by remember { mutableStateOf<TrackPlaybackManager.CacheSizeBreakdown?>(null) }
-    var isEvicting by remember { mutableStateOf(false) }
-
-    // Calculate cache size breakdown on launch
-    LaunchedEffect(Unit) {
-        scope.launch(Dispatchers.IO) {
-            val breakdown = playbackManager.getCacheSizeBreakdown()
-            withContext(Dispatchers.Main) {
-                cacheBreakdown = breakdown
-            }
-        }
-    }
-
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(16.dp)
-            .verticalScroll(rememberScrollState()),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Top
-    ) {
-        Text(
-            text = "Jellyfin Provider Configuration",
-            style = MaterialTheme.typography.headlineMedium,
-            modifier = Modifier.padding(top = 16.dp, bottom = 24.dp)
-        )
-
-        if (isAuthenticated) {
-            Card(
-                modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                )
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text(
-                        text = "✓ Connected",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "User: ${manager.getUsername()}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
-                    Text(
-                        text = manager.getUrl(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Button(
-                onClick = {
-                    scope.launch { manager.logout() }
-                    isAuthenticated = false
-                }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.error
-                )
-            ) {
-                Text("Logout")
-            }
-        } else {
-            OutlinedTextField(
-                value = url,
-                onValueChange = { url = it },
-                label = { Text("Jellyfin Server URL") },
-                placeholder = { Text("https://jellyfin.example.com") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            OutlinedTextField(
-                value = username,
-                onValueChange = { username = it },
-                label = { Text("Username") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            OutlinedTextField(
-                value = password,
-                onValueChange = { password = it },
-                label = { Text("Password") },
-                modifier = Modifier.fillMaxWidth(),
-                visualTransformation = PasswordVisualTransformation(),
-                singleLine = true
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Button(
-                onClick = {
-                    isLoading = true
-                    manager.updateCredentials(url, username, password)
-
-                    scope.launch {
-                        val success = manager.login()
-                        isLoading = false
-
-                        if (success) {
-                            isAuthenticated = true
-
-                            context.contentResolver.notifyChange(
-                                DocumentsContract.buildRootsUri(
-                                    context.applicationContext.getString(
-                                        R.string.documents_authority
-                                    )
-                                ), null
-                            )
-
-                            Toast.makeText(
-                                context, "Login Successful!", Toast.LENGTH_SHORT
-                            ).show()
-                        } else {
-                            Toast.makeText(
-                                context, "Login Failed. Check your credentials.", Toast.LENGTH_LONG
-                            ).show()
-                        }
-                    }
-                },
-                enabled = !isLoading && url.isNotBlank() && username.isNotBlank(),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                if (isLoading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp), color = MaterialTheme.colorScheme.onPrimary
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Connecting...")
-                } else {
-                    Text("Save and Login")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            OutlinedButton(
-                onClick = {
-                    isLoading = true
-                    scope.launch {
-                        val success = manager.testConnection()
-                        isLoading = false
-
-                        Toast.makeText(
-                            context,
-                            if (success) "Connection OK!" else "Connection Failed!",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                }, enabled = !isLoading && url.isNotBlank(), modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Test Connection")
-            }
-        }
-
-        HorizontalDivider(modifier = Modifier.padding(vertical = 24.dp))
-
-        Text(
-            text = "App Settings",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.align(Alignment.Start)
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        OutlinedTextField(
-            value = maxCacheSize,
-            onValueChange = {
-                if (it.isEmpty() || it.all { char -> char.isDigit() }) {
-                    maxCacheSize = it
-                    it.toLongOrNull()?.let { size ->
-                        manager.setMaxCacheSize(size)
-                        playbackManager.setMaxCacheSizeMB(size)
-                    }
-                }
-            },
-            label = { Text("Max Cache Size (MB)") },
-            modifier = Modifier.fillMaxWidth(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            singleLine = true
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        cacheBreakdown?.let { breakdown ->
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    text = "Currently cached: ${
-                        String.format(
-                            "%.2f MB", breakdown.totalSize / (1024.0 * 1024.0)
-                        )
-                    }  / ${breakdown.completeSongsNum + breakdown.partialSongsNum} Songs",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.padding(bottom = 4.dp)
-                )
-                Text(
-                    text = "  • Partial files: ${
-                        String.format(
-                            "%.2f MB", breakdown.partialFilesSize / (1024.0 * 1024.0)
-                        )
-                    }  / ${breakdown.partialSongsNum} Songs",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = "  • Favourite files: ${
-                        String.format(
-                            "%.2f MB", breakdown.favouriteFilesSize / (1024.0 * 1024.0)
-                        )
-                    } / ${breakdown.favouriteSongsNum} Songs",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = "  • Complete files: ${
-                        String.format(
-                            "%.2f MB", breakdown.completeFilesSize / (1024.0 * 1024.0)
-                        )
-                    } / ${breakdown.completeSongsNum} Songs",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = "  • Album arts: ${
-                        String.format(
-                            "%.2f MB", breakdown.albumArtsSize / (1024.0 * 1024.0)
-                        )
-                    }",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = "  • Database: ${
-                        String.format(
-                            "%.2f MB", breakdown.databaseSize / (1024.0 * 1024.0)
-                        )
-                    }",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        } ?: Text(
-            text = "Calculating cache size...",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Refresh cache stats button
-        OutlinedButton(
-            onClick = {
-                scope.launch(Dispatchers.IO) {
-                    val breakdown = playbackManager.getCacheSizeBreakdown()
-                    withContext(Dispatchers.Main) {
-                        cacheBreakdown = breakdown
-                        Toast.makeText(context, "Cache stats refreshed", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }, modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Refresh Cache Stats")
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Eviction button
-        Button(
-            onClick = {
-                isEvicting = true
-                playbackManager.performEviction { count ->
-                    isEvicting = false
-                    // Refresh breakdown
-                    scope.launch(Dispatchers.IO) {
-                        val breakdown = playbackManager.getCacheSizeBreakdown()
-                        withContext(Dispatchers.Main) {
-                            cacheBreakdown = breakdown
-                            Toast.makeText(context, "Evicted $count tracks", Toast.LENGTH_SHORT)
-                                .show()
-                        }
-                    }
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = !isEvicting,
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-        ) {
-            if (isEvicting) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(24.dp),
-                    color = MaterialTheme.colorScheme.onSecondary
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Evicting...")
-            } else {
-                Text("Evict Old Tracks")
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Cache management buttons
-        Button(
-            onClick = {
-                scope.launch(Dispatchers.IO) {
-                    playbackManager.deletePartialFiles(excludeFavourites = true)
-                    val breakdown = playbackManager.getCacheSizeBreakdown()
-                    withContext(Dispatchers.Main) {
-                        cacheBreakdown = breakdown
-                        Toast.makeText(
-                            context, "Partial files deleted (favourites kept)", Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
-        ) {
-            Text("Remove Partial Files")
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Button(
-            onClick = {
-                scope.launch(Dispatchers.IO) {
-                    playbackManager.deleteAllTracks(excludeFavourites = true)
-                    val breakdown = playbackManager.getCacheSizeBreakdown()
-                    withContext(Dispatchers.Main) {
-                        cacheBreakdown = breakdown
-                        Toast.makeText(
-                            context, "All tracks deleted (favourites kept)", Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-        ) {
-            Text("Remove All Downloaded Tracks")
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Button(
-            onClick = {
-                scope.launch(Dispatchers.IO) {
-                    playbackManager.deleteFavouriteTracks()
-                    val breakdown = playbackManager.getCacheSizeBreakdown()
-                    withContext(Dispatchers.Main) {
-                        cacheBreakdown = breakdown
-                        Toast.makeText(context, "Favourite tracks deleted", Toast.LENGTH_SHORT)
-                            .show()
-                    }
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-        ) {
-            Text("Remove Favourite Tracks")
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Button(
-            onClick = {
-                scope.launch(Dispatchers.IO) {
-                    val db = DatabaseManager.getInstance(context)
-                    playbackManager.deleteAllTracks(excludeFavourites = false)
-                    playbackManager.deleteAllAlbumArts()
-                    db.resetDatabase()
-                    val breakdown = playbackManager.getCacheSizeBreakdown()
-                    withContext(Dispatchers.Main) {
-                        cacheBreakdown = breakdown
-                        Toast.makeText(
-                            context, "Database Reset & Cache Cleared", Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-        ) {
-            Text("Reset Database & Clear All Cache")
-        }
-    }
+	val context = LocalContext.current
+	val manager = remember { JellyfinClientManager(context) }
+	val playbackManager = remember { TrackPlaybackManagerSingleton.getInstance(context) }
+	val scope = rememberCoroutineScope()
+	
+	var url by remember { mutableStateOf(manager.getUrl()) }
+	var username by remember { mutableStateOf(manager.getUsername()) }
+	var password by remember { mutableStateOf(manager.getPassword()) }
+	var maxCacheSize by remember { mutableStateOf(manager.getMaxCacheSize().toString()) }
+	var isLoading by remember { mutableStateOf(false) }
+	var isAuthenticated by remember { mutableStateOf(manager.isAuthenticated()) }
+	var cacheBreakdown by remember { mutableStateOf<TrackPlaybackManager.CacheSizeBreakdown?>(null) }
+	var isEvicting by remember { mutableStateOf(false) }
+	var isScanning by remember { mutableStateOf(false) }
+	var scanProgress by remember { mutableStateOf("") }
+	var libraryStats by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+	
+	val performScan = {
+		isScanning = true
+		scanProgress = "Starting scan..."
+		scope.launch(Dispatchers.IO) {
+			try {
+				val db = AppDatabase.getDatabase(context)
+				db.trackDao().deleteAllMetadata()
+				
+				val albums = manager.getAlbums(limit = 100000)
+				var tracksScanned = 0
+				for ((index, album) in albums.withIndex()) {
+					if (!isScanning) break // allow cancellation
+					
+					withContext(Dispatchers.Main) {
+						scanProgress = "Scanning album ${index + 1}/${albums.size}: ${album.name}"
+					}
+					val tracks = manager.getAlbumTracks(album.id)
+					for (track in tracks) {
+						manager.getTrackMetadata(track.id)
+						tracksScanned++
+					}
+				}
+				withContext(Dispatchers.Main) {
+					scanProgress =
+						"Scan complete! Cached metadata for ${albums.size} albums, $tracksScanned tracks."
+					Toast.makeText(context, scanProgress, Toast.LENGTH_LONG).show()
+					isScanning = false
+					
+					// trigger a cache breakdown refresh
+					scope.launch(Dispatchers.IO) {
+						val breakdown = playbackManager.getCacheSizeBreakdown()
+						withContext(Dispatchers.Main) {
+							cacheBreakdown = breakdown
+						}
+					}
+				}
+			} catch (e: Exception) {
+				withContext(Dispatchers.Main) {
+					scanProgress = "Scan failed: ${e.message}"
+					Toast.makeText(context, scanProgress, Toast.LENGTH_LONG).show()
+					isScanning = false
+				}
+			}
+		}
+	}
+	
+	// Calculate cache size breakdown on launch
+	LaunchedEffect(Unit) {
+		scope.launch(Dispatchers.IO) {
+			val breakdown = playbackManager.getCacheSizeBreakdown()
+			withContext(Dispatchers.Main) {
+				cacheBreakdown = breakdown
+			}
+		}
+	}
+	
+	LaunchedEffect(isAuthenticated) {
+		if (isAuthenticated) {
+			scope.launch(Dispatchers.IO) {
+				val stats = manager.getLibraryStats()
+				withContext(Dispatchers.Main) {
+					libraryStats = stats
+				}
+			}
+		} else {
+			libraryStats = null
+		}
+	}
+	
+	Column(
+		modifier = modifier
+			.fillMaxSize()
+			.padding(16.dp)
+			.verticalScroll(rememberScrollState()),
+		horizontalAlignment = Alignment.CenterHorizontally,
+		verticalArrangement = Arrangement.Top
+	) {
+		Text(
+			text = "Jellyfin Provider Configuration",
+			style = MaterialTheme.typography.headlineMedium,
+			modifier = Modifier.padding(top = 16.dp, bottom = 24.dp)
+		)
+		
+		if (isAuthenticated) {
+			Card(
+				modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(
+					containerColor = MaterialTheme.colorScheme.primaryContainer
+				)
+			) {
+				Column(
+					modifier = Modifier.padding(16.dp),
+				) {
+					Text(
+						text = "✓ Connected",
+						style = MaterialTheme.typography.titleLarge,
+						color = MaterialTheme.colorScheme.primary
+					)
+					Text(
+						text = "User: ${manager.getUsername()}",
+						style = MaterialTheme.typography.bodyMedium,
+						modifier = Modifier.padding(top = 8.dp)
+					)
+					Text(
+						text = manager.getUrl(),
+						style = MaterialTheme.typography.bodySmall,
+						color = MaterialTheme.colorScheme.onSurfaceVariant
+					)
+				}
+			}
+			
+			Spacer(modifier = Modifier.height(16.dp))
+			
+			Button(
+				onClick = {
+					scope.launch { manager.logout() }
+					isAuthenticated = false
+				}, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(
+					containerColor = MaterialTheme.colorScheme.error
+				)
+			) {
+				Text("Logout")
+			}
+		} else {
+			OutlinedTextField(
+				value = url,
+				onValueChange = { url = it },
+				label = { Text("Jellyfin Server URL") },
+				placeholder = { Text("https://jellyfin.example.com") },
+				modifier = Modifier.fillMaxWidth(),
+				singleLine = true
+			)
+			
+			Spacer(modifier = Modifier.height(12.dp))
+			
+			OutlinedTextField(
+				value = username,
+				onValueChange = { username = it },
+				label = { Text("Username") },
+				modifier = Modifier.fillMaxWidth(),
+				singleLine = true
+			)
+			
+			Spacer(modifier = Modifier.height(12.dp))
+			
+			OutlinedTextField(
+				value = password,
+				onValueChange = { password = it },
+				label = { Text("Password") },
+				modifier = Modifier.fillMaxWidth(),
+				visualTransformation = PasswordVisualTransformation(),
+				singleLine = true
+			)
+			
+			Spacer(modifier = Modifier.height(24.dp))
+			
+			Button(
+				onClick = {
+					isLoading = true
+					manager.updateCredentials(url, username, password)
+					
+					scope.launch {
+						val success = manager.login()
+						isLoading = false
+						
+						if (success) {
+							isAuthenticated = true
+							
+							context.contentResolver.notifyChange(
+								DocumentsContract.buildRootsUri(
+									context.applicationContext.getString(
+										R.string.documents_authority
+									)
+								), null
+							)
+							
+							Toast.makeText(
+								context, "Login Successful! Starting scan...", Toast.LENGTH_SHORT
+							).show()
+							
+							performScan()
+						} else {
+							Toast.makeText(
+								context, "Login Failed. Check your credentials.", Toast.LENGTH_LONG
+							).show()
+						}
+					}
+				},
+				enabled = !isLoading && url.isNotBlank() && username.isNotBlank(),
+				modifier = Modifier.fillMaxWidth()
+			) {
+				if (isLoading) {
+					CircularProgressIndicator(
+						modifier = Modifier.size(24.dp), color = MaterialTheme.colorScheme.onPrimary
+					)
+					Spacer(modifier = Modifier.width(8.dp))
+					Text("Connecting...")
+				} else {
+					Text("Save and Login")
+				}
+			}
+			
+			Spacer(modifier = Modifier.height(12.dp))
+			
+			OutlinedButton(
+				onClick = {
+					isLoading = true
+					scope.launch {
+						val success = manager.testConnection()
+						isLoading = false
+						
+						Toast.makeText(
+							context,
+							if (success) "Connection OK!" else "Connection Failed!",
+							Toast.LENGTH_SHORT
+						).show()
+					}
+				}, enabled = !isLoading && url.isNotBlank(), modifier = Modifier.fillMaxWidth()
+			) {
+				Text("Test Connection")
+			}
+		}
+		
+		HorizontalDivider(modifier = Modifier.padding(vertical = 24.dp))
+		
+		Text(
+			text = "App Settings",
+			style = MaterialTheme.typography.titleMedium,
+			modifier = Modifier.align(Alignment.Start)
+		)
+		
+		Spacer(modifier = Modifier.height(16.dp))
+		
+		if (isAuthenticated) {
+			libraryStats?.let { stats ->
+				Text(
+					text = "Server Library: ${stats.first} Albums, ${stats.second} Tracks",
+					style = MaterialTheme.typography.bodyMedium,
+					color = MaterialTheme.colorScheme.onSurfaceVariant,
+					modifier = Modifier
+						.padding(bottom = 8.dp)
+						.align(Alignment.Start)
+				)
+			} ?: Text(
+				text = "Fetching library stats...",
+				style = MaterialTheme.typography.bodyMedium,
+				color = MaterialTheme.colorScheme.onSurfaceVariant,
+				modifier = Modifier
+					.padding(bottom = 8.dp)
+					.align(Alignment.Start)
+			)
+		}
+		
+		// Scan Library Button
+		Button(
+			onClick = { performScan() },
+			modifier = Modifier.fillMaxWidth(),
+			enabled = !isScanning && !isEvicting && isAuthenticated,
+			colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+		) {
+			if (isScanning) {
+				CircularProgressIndicator(
+					modifier = Modifier.size(24.dp), color = MaterialTheme.colorScheme.onPrimary
+				)
+				Spacer(modifier = Modifier.width(8.dp))
+				Text(scanProgress)
+			} else {
+				Text("Scan Library")
+			}
+		}
+		
+		Spacer(modifier = Modifier.height(16.dp))
+		
+		OutlinedTextField(
+			value = maxCacheSize,
+			onValueChange = {
+				if (it.isEmpty() || it.all { char -> char.isDigit() }) {
+					maxCacheSize = it
+					it.toLongOrNull()?.let { size ->
+						manager.setMaxCacheSize(size)
+						playbackManager.setMaxCacheSizeMB(size)
+					}
+				}
+			},
+			label = { Text("Max Cache Size (MB)") },
+			modifier = Modifier.fillMaxWidth(),
+			keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+			singleLine = true
+		)
+		
+		Spacer(modifier = Modifier.height(16.dp))
+		
+		cacheBreakdown?.let { breakdown ->
+			Column(modifier = Modifier.fillMaxWidth()) {
+				Text(
+					text = "Currently cached: ${
+						String.format(
+							"%.2f MB", breakdown.totalSize / (1024.0 * 1024.0)
+						)
+					}  / ${breakdown.completeSongsNum + breakdown.partialSongsNum} Songs",
+					style = MaterialTheme.typography.bodyLarge,
+					color = MaterialTheme.colorScheme.onSurface,
+					modifier = Modifier.padding(bottom = 4.dp)
+				)
+				Text(
+					text = "  • Partial files: ${
+						String.format(
+							"%.2f MB", breakdown.partialFilesSize / (1024.0 * 1024.0)
+						)
+					}  / ${breakdown.partialSongsNum} Songs",
+					style = MaterialTheme.typography.bodySmall,
+					color = MaterialTheme.colorScheme.onSurfaceVariant
+				)
+				Text(
+					text = "  • Favourite files: ${
+						String.format(
+							"%.2f MB", breakdown.favouriteFilesSize / (1024.0 * 1024.0)
+						)
+					} / ${breakdown.favouriteSongsNum} Songs",
+					style = MaterialTheme.typography.bodySmall,
+					color = MaterialTheme.colorScheme.onSurfaceVariant
+				)
+				Text(
+					text = "  • Complete files: ${
+						String.format(
+							"%.2f MB", breakdown.completeFilesSize / (1024.0 * 1024.0)
+						)
+					} / ${breakdown.completeSongsNum} Songs",
+					style = MaterialTheme.typography.bodySmall,
+					color = MaterialTheme.colorScheme.onSurfaceVariant
+				)
+				Text(
+					text = "  • Album arts: ${
+						String.format(
+							"%.2f MB", breakdown.albumArtsSize / (1024.0 * 1024.0)
+						)
+					}",
+					style = MaterialTheme.typography.bodySmall,
+					color = MaterialTheme.colorScheme.onSurfaceVariant
+				)
+				Text(
+					text = "  • Database: ${
+						String.format(
+							"%.2f MB", breakdown.databaseSize / (1024.0 * 1024.0)
+						)
+					}",
+					style = MaterialTheme.typography.bodySmall,
+					color = MaterialTheme.colorScheme.onSurfaceVariant
+				)
+			}
+		} ?: Text(
+			text = "Calculating cache size...",
+			style = MaterialTheme.typography.bodyMedium,
+			color = MaterialTheme.colorScheme.onSurfaceVariant
+		)
+		
+		Spacer(modifier = Modifier.height(8.dp))
+		
+		// Refresh cache stats button
+		OutlinedButton(
+			onClick = {
+				scope.launch(Dispatchers.IO) {
+					val breakdown = playbackManager.getCacheSizeBreakdown()
+					withContext(Dispatchers.Main) {
+						cacheBreakdown = breakdown
+						Toast.makeText(context, "Cache stats refreshed", Toast.LENGTH_SHORT).show()
+					}
+				}
+			}, modifier = Modifier.fillMaxWidth()
+		) {
+			Text("Refresh Cache Stats")
+		}
+		
+		Spacer(modifier = Modifier.height(8.dp))
+		
+		// Eviction button
+		Button(
+			onClick = {
+				isEvicting = true
+				playbackManager.performEviction { count ->
+					isEvicting = false
+					// Refresh breakdown
+					scope.launch(Dispatchers.IO) {
+						val breakdown = playbackManager.getCacheSizeBreakdown()
+						withContext(Dispatchers.Main) {
+							cacheBreakdown = breakdown
+							Toast.makeText(context, "Evicted $count tracks", Toast.LENGTH_SHORT)
+								.show()
+						}
+					}
+				}
+			},
+			modifier = Modifier.fillMaxWidth(),
+			enabled = !isEvicting,
+			colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+		) {
+			if (isEvicting) {
+				CircularProgressIndicator(
+					modifier = Modifier.size(24.dp), color = MaterialTheme.colorScheme.onSecondary
+				)
+				Spacer(modifier = Modifier.width(8.dp))
+				Text("Evicting...")
+			} else {
+				Text("Evict Old Tracks")
+			}
+		}
+		
+		Spacer(modifier = Modifier.height(16.dp))
+		
+		// Cache management buttons
+		Button(
+			onClick = {
+				scope.launch(Dispatchers.IO) {
+					playbackManager.deletePartialFiles(excludeFavourites = true)
+					val breakdown = playbackManager.getCacheSizeBreakdown()
+					withContext(Dispatchers.Main) {
+						cacheBreakdown = breakdown
+						Toast.makeText(
+							context, "Partial files deleted (favourites kept)", Toast.LENGTH_SHORT
+						).show()
+					}
+				}
+			},
+			modifier = Modifier.fillMaxWidth(),
+			colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
+		) {
+			Text("Remove Partial Files")
+		}
+		
+		Spacer(modifier = Modifier.height(8.dp))
+		
+		Button(
+			onClick = {
+				scope.launch(Dispatchers.IO) {
+					playbackManager.deleteAllTracks(excludeFavourites = true)
+					val breakdown = playbackManager.getCacheSizeBreakdown()
+					withContext(Dispatchers.Main) {
+						cacheBreakdown = breakdown
+						Toast.makeText(
+							context, "All tracks deleted (favourites kept)", Toast.LENGTH_SHORT
+						).show()
+					}
+				}
+			},
+			modifier = Modifier.fillMaxWidth(),
+			colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+		) {
+			Text("Remove All Downloaded Tracks")
+		}
+		
+		Spacer(modifier = Modifier.height(8.dp))
+		
+		Button(
+			onClick = {
+				scope.launch(Dispatchers.IO) {
+					playbackManager.deleteFavouriteTracks()
+					val breakdown = playbackManager.getCacheSizeBreakdown()
+					withContext(Dispatchers.Main) {
+						cacheBreakdown = breakdown
+						Toast.makeText(context, "Favourite tracks deleted", Toast.LENGTH_SHORT)
+							.show()
+					}
+				}
+			},
+			modifier = Modifier.fillMaxWidth(),
+			colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+		) {
+			Text("Remove Favourite Tracks")
+		}
+		
+		Spacer(modifier = Modifier.height(16.dp))
+		
+		Button(
+			onClick = {
+				scope.launch(Dispatchers.IO) {
+					val db = AppDatabase.getDatabase(context)
+					playbackManager.deleteAllTracks(excludeFavourites = false)
+					playbackManager.deleteAllAlbumArts()
+					db.clearAllTables()
+					val breakdown = playbackManager.getCacheSizeBreakdown()
+					withContext(Dispatchers.Main) {
+						cacheBreakdown = breakdown
+						Toast.makeText(
+							context, "Database Reset & Cache Cleared", Toast.LENGTH_SHORT
+						).show()
+					}
+				}
+			},
+			modifier = Modifier.fillMaxWidth(),
+			colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+		) {
+			Text("Reset Database & Clear All Cache")
+		}
+	}
 }

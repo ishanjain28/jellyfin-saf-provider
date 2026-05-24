@@ -1,10 +1,12 @@
 package me.ishan.jellyfin_saf
 
+import android.content.ContentResolver
 import android.content.Context
 import android.content.res.AssetFileDescriptor
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.graphics.Point
+import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.Handler
 import android.os.HandlerThread
@@ -31,7 +33,6 @@ class JellyfinMusicProvider : DocumentsProvider() {
 	
 	private lateinit var jellyfinClient: JellyfinClientManager
 	private lateinit var playbackManager: TrackPlaybackManager
-	private lateinit var db: MediaDatabaseHelper
 	
 	private val proxyThreads = mutableListOf<HandlerThread>()
 	private val proxyHandlers = mutableListOf<Handler>()
@@ -92,8 +93,6 @@ class JellyfinMusicProvider : DocumentsProvider() {
 			)
 			
 			playbackManager = TrackPlaybackManagerSingleton.getInstance(context = ctx)
-			
-			db = DatabaseManager.getInstance(ctx)
 			
 			// Initialize proxy thread pool
 			synchronized(proxyThreads) {
@@ -182,18 +181,13 @@ class JellyfinMusicProvider : DocumentsProvider() {
 					
 					result.newRow().apply {
 						add(
-							DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentId.forTrack(
-								metadata.albumId ?: UUID.randomUUID(),
-								metadata.id,
-								metadata.sizeBytes,
-								metadata.durationMs
-							)
+							DocumentsContract.Document.COLUMN_DOCUMENT_ID, docId
 						)
 						add(DocumentsContract.Document.COLUMN_MIME_TYPE, metadata.mimeType)
 						add(
 							DocumentsContract.Document.COLUMN_DISPLAY_NAME, metadata.title
 						)
-						add(DocumentsContract.Document.COLUMN_SIZE, metadata.sizeBytes)
+						add(DocumentsContract.Document.COLUMN_SIZE, metadata.size)
 						add(
 							DocumentsContract.Document.COLUMN_LAST_MODIFIED, metadata.lastFetched
 						)
@@ -205,11 +199,10 @@ class JellyfinMusicProvider : DocumentsProvider() {
 						// Poweramp metadata
 						add(MediaStore.Audio.Media.TITLE, metadata.title)
 						add(
-							MediaStore.Audio.Media.ARTIST,
-							metadata.artists.joinToString(separator = "; ")
+							MediaStore.Audio.Media.ARTIST, metadata.artist
 						)
 						add(MediaStore.Audio.Media.ALBUM, metadata.album)
-						add(MediaStore.Audio.Media.DURATION, metadata.durationMs)
+						add(MediaStore.Audio.Media.DURATION, metadata.duration)
 						add(MediaStore.Audio.Media.YEAR, metadata.year)
 						add(MediaStore.Audio.Media.TRACK, metadata.trackNumber)
 						add(MediaStore.Audio.AudioColumns.TRACK, metadata.trackNumber)
@@ -218,8 +211,7 @@ class JellyfinMusicProvider : DocumentsProvider() {
 						add(MediaStore.Audio.Media.IS_FAVORITE, metadata.isFavourite)
 						add(MediaStore.Audio.Media.ALBUM_ARTIST, metadata.albumArtist)
 						add(
-							MediaStore.Audio.Media.GENRE,
-							metadata.genres.joinToString(separator = "; ")
+							MediaStore.Audio.Media.GENRE, metadata.genres
 						)
 						add(MediaStore.Audio.Media.IS_MUSIC, 1)
 						
@@ -257,8 +249,7 @@ class JellyfinMusicProvider : DocumentsProvider() {
 		try {
 			when (parentDocumentId) {
 				is DocumentId.Type.Root -> {
-					// TODO: List all albums
-					val albums = runBlocking { jellyfinClient.getAlbums(limit = 1000) }
+					val albums = runBlocking { jellyfinClient.getAlbums(limit = 100000) }
 					
 					albums.forEach { album ->
 						result.newRow().apply {
@@ -315,17 +306,17 @@ class JellyfinMusicProvider : DocumentsProvider() {
 						result.newRow().apply {
 							add(
 								DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentId.forTrack(
-									track.albumId ?: UUID.randomUUID(),
+									parentDocumentId.albumId,
 									track.id,
-									metadata.sizeBytes,
-									metadata.durationMs
+									metadata.size ?: 0L,
+									metadata.duration ?: 0L
 								)
 							)
 							add(DocumentsContract.Document.COLUMN_MIME_TYPE, metadata.mimeType)
 							add(
 								DocumentsContract.Document.COLUMN_DISPLAY_NAME, metadata.title
 							)
-							add(DocumentsContract.Document.COLUMN_SIZE, metadata.sizeBytes)
+							add(DocumentsContract.Document.COLUMN_SIZE, metadata.size)
 							add(
 								DocumentsContract.Document.COLUMN_LAST_MODIFIED,
 								metadata.lastFetched
@@ -338,11 +329,10 @@ class JellyfinMusicProvider : DocumentsProvider() {
 							// Poweramp metadata
 							add(MediaStore.Audio.Media.TITLE, metadata.title)
 							add(
-								MediaStore.Audio.Media.ARTIST,
-								metadata.artists.joinToString(separator = "; ")
+								MediaStore.Audio.Media.ARTIST, metadata.artist
 							)
 							add(MediaStore.Audio.Media.ALBUM, metadata.album)
-							add(MediaStore.Audio.Media.DURATION, metadata.durationMs)
+							add(MediaStore.Audio.Media.DURATION, metadata.duration)
 							add(MediaStore.Audio.Media.YEAR, metadata.year)
 							add(MediaStore.Audio.Media.TRACK, metadata.trackNumber)
 							add(MediaStore.Audio.Media.DISC_NUMBER, metadata.discNumber)
@@ -351,8 +341,7 @@ class JellyfinMusicProvider : DocumentsProvider() {
 							add(MediaStore.Audio.Media.IS_FAVORITE, metadata.isFavourite)
 							add(MediaStore.Audio.Media.ALBUM_ARTIST, metadata.albumArtist)
 							add(
-								MediaStore.Audio.Media.GENRE,
-								metadata.genres.joinToString(separator = "; ")
+								MediaStore.Audio.Media.GENRE, metadata.genres
 							)
 							add(MediaStore.Audio.Media.IS_MUSIC, 1)
 							if (lyrics != null) {
@@ -448,7 +437,6 @@ class JellyfinMusicProvider : DocumentsProvider() {
 				override fun onRead(offset: Long, size: Int, data: ByteArray): Int =
 					trackStream.read(data, offset, size)
 				
-				
 				override fun onRelease() {
 					Log.d(TAG, "[${documentId.trackId}] ProxyFD released")
 					trackStream.close()
@@ -459,7 +447,7 @@ class JellyfinMusicProvider : DocumentsProvider() {
 	
 	override fun openDocumentThumbnail(
 		documentId: String, sizeHint: Point?, signal: CancellationSignal?
-	): android.content.res.AssetFileDescriptor {
+	): AssetFileDescriptor {
 		val albumId = when (val docId = DocumentId.parse(documentId)) {
 			is DocumentId.Type.Album -> {
 				docId.albumId
@@ -483,10 +471,10 @@ class JellyfinMusicProvider : DocumentsProvider() {
 				playbackManager.downloadThumbnail(albumId, jellyfinClient, sizeHint)
 			} ?: throw FileNotFoundException("Thumbnail not available")
 		}
-		return android.content.res.AssetFileDescriptor(
+		return AssetFileDescriptor(
 			ParcelFileDescriptor.open(thumbFile, ParcelFileDescriptor.MODE_READ_ONLY),
 			0,
-			android.content.res.AssetFileDescriptor.UNKNOWN_LENGTH
+			AssetFileDescriptor.UNKNOWN_LENGTH
 		)
 	}
 	

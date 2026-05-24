@@ -3,6 +3,7 @@ package me.ishan.jellyfin_saf
 import android.content.Context
 import android.graphics.Point
 import android.util.Log
+import me.ishan.jellyfin_saf.db.TrackStateEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -10,6 +11,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import me.ishan.jellyfin_saf.db.AppDatabase
 import org.jellyfin.sdk.model.UUID
 import java.io.File
 import java.nio.ByteBuffer
@@ -19,7 +21,7 @@ import java.util.BitSet
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.exists
 
-class SharedTrackState(val entry: MediaCacheRecord) {
+class SharedTrackState(val entry: TrackStateEntity) {
 	@Volatile
 	var waitLock = Object()
 	
@@ -29,8 +31,8 @@ class SharedTrackState(val entry: MediaCacheRecord) {
 	@Volatile
 	var activeReaders: Int = 0
 	
-	fun nextClearBitDisk(chunk: Int): Int = synchronized(entry.chunks()) {
-		entry.chunks().nextClearBit(chunk)
+	fun nextClearBitDisk(chunk: Int): Int = synchronized(entry.chunks) {
+		entry.chunks.nextClearBit(chunk)
 	}
 	
 	fun isChunkInFlight(chunk: Int): Boolean = synchronized(inFlightChunks) {
@@ -48,8 +50,8 @@ class SharedTrackState(val entry: MediaCacheRecord) {
 	fun nextClearBitAny(startChunk: Int): Int {
 		var current = startChunk
 		while (true) {
-			val nextDiskGap = synchronized(entry.chunks()) {
-				entry.chunks().nextClearBit(current)
+			val nextDiskGap = synchronized(entry.chunks) {
+				entry.chunks.nextClearBit(current)
 			}
 			val inFlight = synchronized(inFlightChunks) {
 				inFlightChunks.get(nextDiskGap)
@@ -60,8 +62,8 @@ class SharedTrackState(val entry: MediaCacheRecord) {
 	}
 	
 	fun nextSetBitAny(startChunk: Int): Int {
-		val nextDiskFilled = synchronized(entry.chunks()) {
-			entry.chunks().nextSetBit(startChunk)
+		val nextDiskFilled = synchronized(entry.chunks) {
+			entry.chunks.nextSetBit(startChunk)
 		}
 		val nextInFlight = synchronized(inFlightChunks) {
 			inFlightChunks.nextSetBit(startChunk)
@@ -78,7 +80,7 @@ class TrackStream(
 	val trackId: UUID,
 	val sharedState: SharedTrackState,
 	private val channel: FileChannel,
-	private val db: MediaDatabaseHelper,
+	private val db: AppDatabase,
 	private val jellyfinClient: JellyfinClientManager,
 	private val onCloseCallback: () -> Unit
 ) {
@@ -120,6 +122,24 @@ class TrackStream(
 	
 	// Must be called before discarding TrackStream
 	// Idempotent - safe to call multiple times
+	private fun updateState(id: UUID, newChunks: BitSet) {
+		val entity = db.trackDao().getTrackStateById(id) ?: return
+		val bitset = entity.chunks
+		val totalChunks =
+			(entity.sizeBytes + TrackStateEntity.CHUNK_SIZE - 1) / TrackStateEntity.CHUNK_SIZE
+		
+		bitset.or(newChunks)
+		val newState =
+			if (bitset.cardinality() >= totalChunks) ContentState.COMPLETE else ContentState.PARTIAL
+		
+		if (newState == ContentState.COMPLETE) {
+			Log.i(TAG, "[$id] Download complete (${bitset.cardinality()}/$totalChunks)")
+		}
+		
+		val updatedEntity = entity.copy(chunks = bitset, state = newState)
+		db.trackDao().updateTrackState(updatedEntity)
+	}
+	
 	fun close() {
 		if (isClosed) return
 		isClosed = true
@@ -133,7 +153,7 @@ class TrackStream(
 		// 3. Save state in the background without blocking this thread
 		if (sharedState.activeReaders == 1) {
 			try {
-				db.updateState(trackId, entry.chunks())
+				updateState(trackId, entry.chunks)
 			} catch (e: Exception) {
 				Log.w(TAG, "[$trackId] Failed to save state: ${e.message}")
 			}
@@ -146,32 +166,43 @@ class TrackStream(
 	fun read(data: ByteArray, offset: Long, size: Int): Int {
 		if (isClosed || offset >= entry.sizeBytes) return 0
 		
-		val startChunk = (offset / MediaCacheRecord.CHUNK_SIZE).toInt()
-		val endChunk = ((offset + size - 1) / MediaCacheRecord.CHUNK_SIZE).toInt()
+		val startChunk = (offset / TrackStateEntity.CHUNK_SIZE).toInt()
+		val endChunk = ((offset + size - 1) / TrackStateEntity.CHUNK_SIZE).toInt()
 		val totalChunks =
-			((entry.sizeBytes + MediaCacheRecord.CHUNK_SIZE - 1) / MediaCacheRecord.CHUNK_SIZE).toInt()
+			((entry.sizeBytes + TrackStateEntity.CHUNK_SIZE - 1) / TrackStateEntity.CHUNK_SIZE).toInt()
 		
 		// When to trigger downloads ?
 		// 1. If we don't have the data to serve the current request
 		// 2. If the buffer is running low, < LOW_BUFFER_SECONDS seconds left
 		val nextMissingAny = sharedState.nextClearBitAny(startChunk)
 		val bufferedSecondsAny =
-			secondsInBytes((nextMissingAny - startChunk).toLong() * MediaCacheRecord.CHUNK_SIZE)
+			secondsInBytes((nextMissingAny - startChunk).toLong() * TrackStateEntity.CHUNK_SIZE)
 		val prefetchChunks =
-			(bytesInSeconds(PREFETCH_SECONDS) / MediaCacheRecord.CHUNK_SIZE).toInt()
+			(bytesInSeconds(PREFETCH_SECONDS) / TrackStateEntity.CHUNK_SIZE).toInt()
 		val targetEndChunk = minOf(totalChunks - 1, nextMissingAny + prefetchChunks - 1)
 		
 		// Trigger a download if,
 		// 1. The chunk to serve this request is not on disk, nor in-flight
 		// 2. The buffer on disk or in flight is running lower than NUM_BUFFER_SECONDS
-		//    and the new request will request additional data than what is in flight
-		if (nextMissingAny <= endChunk || (bufferedSecondsAny <= LOW_BUFFER_SECONDS && nextMissingAny <= targetEndChunk)) {
-			val currentDownload = activeDownload
-			
-			currentDownload?.job?.cancel()
-			if (currentDownload != null) {
+		//    AND the new request will request additional data than what is in flight AND there is
+		//    no other request in progress
+		val activeDl = activeDownload
+		val urgentlyNeeded = nextMissingAny <= endChunk
+		val prefetchNeeded =
+			bufferedSecondsAny <= LOW_BUFFER_SECONDS && nextMissingAny <= targetEndChunk
+		val isFetchingUrgent =
+			activeDl != null && activeDl.startChunk <= nextMissingAny && activeDl.endChunkInclusive >= nextMissingAny
+		val shouldTriggerDownload = if (urgentlyNeeded) {
+			!isFetchingUrgent
+		} else {
+			prefetchNeeded && activeDl == null
+		}
+		
+		if (shouldTriggerDownload) {
+			activeDl?.job?.cancel()
+			if (activeDl != null) {
 				sharedState.releaseChunks(
-					currentDownload.startChunk, currentDownload.endChunkInclusive + 1
+					activeDl.startChunk, activeDl.endChunkInclusive + 1
 				)
 				activeDownload = null
 			}
@@ -210,14 +241,12 @@ class TrackStream(
 	 * Downloads a specific range of chunks. Range Inclusive.
 	 */
 	private fun downloadRange(alignedStartChunk: Int, alignedEndChunk: Int) {
-		val alignedStartOffset = alignedStartChunk.toLong() * MediaCacheRecord.CHUNK_SIZE
+		val alignedStartOffset = alignedStartChunk.toLong() * TrackStateEntity.CHUNK_SIZE
 		val alignedEndOffset =
-			minOf(entry.sizeBytes, (alignedEndChunk.toLong() + 1) * MediaCacheRecord.CHUNK_SIZE)
+			minOf(entry.sizeBytes, (alignedEndChunk.toLong() + 1) * TrackStateEntity.CHUNK_SIZE)
 		
 		// Skip if we have this whole range
 		if (sharedState.nextClearBitDisk(alignedStartChunk) > alignedEndChunk) return
-		// Skip if the whole range is in flight already!
-//		if (sharedState.isChunkInFlight(alignedStartChunk) return
 		
 		Log.i(
 			TAG,
@@ -237,16 +266,16 @@ class TrackStream(
 					byteLength = alignedEndOffset - alignedStartOffset,
 					onProgress = { absolutePosition ->
 						val endChunk = if (absolutePosition >= entry.sizeBytes) {
-							((entry.sizeBytes + MediaCacheRecord.CHUNK_SIZE - 1) / MediaCacheRecord.CHUNK_SIZE).toInt() - 1
+							((entry.sizeBytes + TrackStateEntity.CHUNK_SIZE - 1) / TrackStateEntity.CHUNK_SIZE).toInt() - 1
 						} else {
 							val bytesDownloaded = absolutePosition - alignedStartOffset
 							val completeChunks =
-								(bytesDownloaded / MediaCacheRecord.CHUNK_SIZE).toInt()
+								(bytesDownloaded / TrackStateEntity.CHUNK_SIZE).toInt()
 							alignedStartChunk + completeChunks - 1
 						}
 						if (endChunk >= alignedStartChunk) {
-							synchronized(entry.chunks()) {
-								entry.chunks().set(alignedStartChunk, endChunk + 1)
+							synchronized(entry.chunks) {
+								entry.chunks.set(alignedStartChunk, endChunk + 1)
 							}
 							sharedState.releaseChunks(alignedStartChunk, endChunk + 1)
 							synchronized(waitLock) {
@@ -288,7 +317,7 @@ class TrackStream(
 class TrackPlaybackManager(
 	private val tracksDir: File,
 	private val thumbDir: File,
-	private val db: MediaDatabaseHelper,
+	private val db: AppDatabase,
 	private val dbPath: File,
 	private var maxCacheSizeMB: Long = 2048
 ) {
@@ -314,17 +343,16 @@ class TrackPlaybackManager(
 					onComplete(0)
 					return@launch
 				}
-				val oldestTracks = db.getOldestAccessedTracks(excludeFavourites = true)
+				val oldestTracks = db.trackDao().getOldestAccessedTrackStatesExcludingFav()
 				for (record in oldestTracks) {
 					val file = record.getFile(tracksDir)
 					val fileSize =
-						if (record.state() == ContentState.COMPLETE) file.length() else record
-							.chunks().cardinality() * MediaCacheRecord.CHUNK_SIZE
+						if (record.state == ContentState.COMPLETE) file.length() else record.chunks.cardinality() * TrackStateEntity.CHUNK_SIZE
 					if (file.exists() && file.delete()) {
 						evictedCount++
 						currentSize -= fileSize
 					}
-					db.deleteTrackRecord(record.id)
+					db.trackDao().deleteTrackById(record.id)
 					if (currentSize <= limitBytes * 0.9) break
 				}
 			} catch (e: Exception) {
@@ -355,7 +383,17 @@ class TrackPlaybackManager(
 				existingState.activeReaders += 1
 				existingState
 			} else {
-				val entry = db.markOpenedForStreaming(trackId, sizeBytes, durationMs)
+				var entry = db.trackDao().getTrackStateById(trackId)
+				if (entry == null) {
+					entry = TrackStateEntity(
+						id = trackId,
+						sizeBytes = sizeBytes,
+						durationMs = durationMs,
+						state = ContentState.PARTIAL,
+						chunks = BitSet()
+					)
+					db.trackDao().insertTrackState(entry)
+				}
 				SharedTrackState(entry).apply { activeReaders = 1 }
 			}
 		}!!
@@ -371,8 +409,8 @@ class TrackPlaybackManager(
 	}
 	
 	fun getCachedTrack(trackId: UUID): File? {
-		val entry = db.getMediaCacheRecord(trackId)
-		if (entry?.state() != ContentState.COMPLETE) {
+		val entry = db.trackDao().getTrackStateById(trackId)
+		if (entry?.state != ContentState.COMPLETE) {
 			return null
 		}
 		val path = File(tracksDir, "$trackId.cache").toPath()
@@ -382,8 +420,8 @@ class TrackPlaybackManager(
 		return path.toFile()
 	}
 	
-	fun getCachedThumbnail(itemId: UUID): File? =
-		File(thumbDir, "$itemId.jpg").takeIf { it.exists() }
+	fun getCachedThumbnail(albumId: UUID): File? =
+		File(thumbDir, "$albumId.jpg").takeIf { it.exists() }
 	
 	suspend fun downloadThumbnail(
 		itemId: UUID, client: JellyfinClientManager, size: Point?
@@ -394,9 +432,13 @@ class TrackPlaybackManager(
 	}
 	
 	fun deletePartialFiles(excludeFavourites: Boolean = true) {
-		val partialTracks = db.getAllTracks(ContentState.PARTIAL, excludeFavourites)
+		val partialTracks = if (excludeFavourites) db.trackDao()
+			.getTrackIdsByStateExcludingFav(ContentState.PARTIAL) else db.trackDao()
+			.getTrackIdsByState(ContentState.PARTIAL)
 		partialTracks.forEach { File(tracksDir, "$it.cache").delete() }
-		db.deleteAllTracks(ContentState.PARTIAL, excludeFavourites)
+		if (excludeFavourites) db.trackDao()
+			.deleteTracksByStateExcludingFav(ContentState.PARTIAL) else db.trackDao()
+			.deleteTracksByState(ContentState.PARTIAL)
 	}
 	
 	fun deleteAllAlbumArts(): Int {
@@ -407,14 +449,17 @@ class TrackPlaybackManager(
 	}
 	
 	fun deleteAllTracks(excludeFavourites: Boolean = true) {
-		val allTracks = db.getAllTracks(null, excludeFavourites)
+		val allTracks =
+			if (excludeFavourites) db.trackDao().getTrackIdsExcludingFav() else db.trackDao()
+				.getAllTrackIds()
 		allTracks.forEach { File(tracksDir, "$it.cache").delete() }
-		db.deleteAllTracks(null, excludeFavourites)
+		if (excludeFavourites) db.trackDao().deleteTracksExcludingFav() else db.trackDao()
+			.deleteAllMetadata()
 	}
 	
 	fun deleteFavouriteTracks() {
-		db.getFavouriteTracks().forEach { File(tracksDir, "$it.cache").delete() }
-		db.deleteFavouriteTracks()
+		db.trackDao().getFavouriteTrackIds().forEach { File(tracksDir, "$it.cache").delete() }
+		db.trackDao().deleteFavouriteTracks()
 	}
 	
 	data class CacheSizeBreakdown(
@@ -437,8 +482,8 @@ class TrackPlaybackManager(
 		var completeNum = 0
 		var favouritesSize = 0L
 		var favouriteNum = 0
-		val partialTracks = db.getAllTracks(ContentState.PARTIAL, false).toSet()
-		val favouriteTracks = db.getFavouriteTracks().toSet()
+		val partialTracks = db.trackDao().getTrackIdsByState(ContentState.PARTIAL).toSet()
+		val favouriteTracks = db.trackDao().getFavouriteTrackIds().toSet()
 		tracksDir.listFiles()?.forEach { file ->
 			val trackId = try {
 				UUID.fromString(file.nameWithoutExtension)
@@ -447,8 +492,8 @@ class TrackPlaybackManager(
 			} ?: return@forEach
 			if (partialTracks.contains(trackId)) {
 				partialNum++
-				val size = db.getMediaCacheRecord(trackId)?.chunks()?.cardinality()
-					?.times(MediaCacheRecord.CHUNK_SIZE) ?: 0L
+				val size = db.trackDao().getTrackStateById(trackId)?.chunks?.cardinality()
+					?.times(TrackStateEntity.CHUNK_SIZE) ?: 0L
 				if (favouriteTracks.contains(trackId)) {
 					favouriteNum++; favouritesSize += size
 				}
@@ -491,10 +536,10 @@ object TrackPlaybackManagerSingleton {
 			val client = JellyfinClientManager(appContext)
 			TrackPlaybackManager(
 				File(
-					appContext.filesDir, "jellyfin_tracks"
-				).apply { mkdirs() },
+				appContext.filesDir, "jellyfin_tracks"
+			).apply { mkdirs() },
 				File(appContext.cacheDir, "jellyfin_thumbs").apply { mkdirs() },
-				DatabaseManager.getInstance(appContext),
+				AppDatabase.getDatabase(appContext),
 				appContext.getDatabasePath("jellyfin_media_cache.db"),
 				client.getMaxCacheSize()
 			).also { INSTANCE = it }
