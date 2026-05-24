@@ -10,6 +10,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import me.ishan.jellyfin_saf.db.AppDatabase
 import org.jellyfin.sdk.model.UUID
@@ -385,6 +386,10 @@ class TrackPlaybackManager(
 			} else {
 				var entry = db.trackDao().getTrackStateById(trackId)
 				if (entry == null) {
+					// The database might have been cleared while poweramp still has the URI. 
+					// We MUST ensure the parent TrackEntity exists before inserting TrackStateEntity due to ForeignKey constraints.
+					runBlocking { jellyfinClient.getTrackMetadata(trackId) }
+					
 					entry = TrackStateEntity(
 						id = trackId,
 						sizeBytes = sizeBytes,

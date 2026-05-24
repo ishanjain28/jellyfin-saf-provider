@@ -354,7 +354,7 @@ class JellyfinClientManager(private val context: Context? = null) {
 	/**
 	 * Get tracks in an album
 	 */
-	suspend fun getAlbumTracks(albumId: UUID): List<BaseItemDto> = withContext(Dispatchers.IO) {
+	suspend fun getAlbumTracks(albumId: UUID): List<TrackEntity> = withContext(Dispatchers.IO) {
 		val apiClient = getApiClient() ?: return@withContext emptyList()
 		val userId = currentUserId ?: return@withContext emptyList()
 		
@@ -364,10 +364,53 @@ class JellyfinClientManager(private val context: Context? = null) {
 				parentId = albumId,
 				includeItemTypes = setOf(BaseItemKind.AUDIO),
 				limit = 100,
-				fields = setOf(ItemFields.GENRES)
+				fields = setOf(
+					ItemFields.GENRES, ItemFields.MEDIA_SOURCES, ItemFields.DATE_CREATED
+				),
+				enableImages = false,
 			)
 			
-			result.content.items
+			val tracks = ArrayList<TrackEntity>(result.content.totalRecordCount)
+			val items = result.content.items
+			items.forEach { track ->
+				if (track.mediaSources == null || track.mediaSources?.size == 0) {
+					return@forEach;
+				}
+				val path = track.path ?: track.mediaSources?.get(0)?.path
+				
+				val mimeType = if (path != null) {
+					val ext = Path(path).extension
+					MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "audio/$ext"
+				} else {
+					"null"
+				}
+				
+				val entity = TrackEntity(
+					id = track.id,
+					title = track.name.orEmpty(),
+					artist = track.artists?.joinToString(";"),
+					albumId = track.albumId,
+					album = track.album ?: "Unknown Album",
+					year = track.productionYear,
+					duration = track.runTimeTicks?.div(10000) ?: 0L,
+					size = track.mediaSources?.firstOrNull()?.size ?: 0L,
+					genres = track.genres?.joinToString(";"),
+					trackNumber = track.indexNumber,
+					numTracks = track.indexNumberEnd ?: 0,
+					discNumber = track.parentIndexNumber,
+					dateModified = track.dateCreated?.toString(),
+					mimeType = mimeType,
+					albumArtist = track.albumArtist ?: "",
+					dateCreated = track.premiereDate?.toString(),
+					isFavourite = track.userData?.isFavorite ?: false,
+					lastFetched = System.currentTimeMillis()
+				)
+				
+				db?.trackDao()?.insertTrack(entity)
+				tracks.add(entity);
+			}
+			
+			tracks
 		} catch (e: InvalidStatusException) {
 			Log.w(TAG, "getAlbumTracks $albumId received ${e.status} code")
 			if (e.status == 401) {
@@ -400,13 +443,13 @@ class JellyfinClientManager(private val context: Context? = null) {
 			)
 			
 			val item = result.content
+			val path = item.path ?: item.mediaSources?.get(0)?.path
 			
-			val mimeType = if (item.path != null) {
-				val ext = Path(item.path!!).extension
+			val mimeType = if (path != null) {
+				val ext = Path(path).extension
 				MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "audio/$ext"
 			} else {
-				// default fallback
-				"audio/mp3"
+				"null"
 			}
 			
 			val entity = TrackEntity(
@@ -579,8 +622,7 @@ class JellyfinClientManager(private val context: Context? = null) {
 			}
 		} catch (e: InvalidStatusException) {
 			Log.w(
-				TAG,
-				"downloadAlbumArt item=$itemId sizeHint=$sizeHint received ${e.status} code"
+				TAG, "downloadAlbumArt item=$itemId sizeHint=$sizeHint received ${e.status} code"
 			)
 			if (e.status == 401) {
 				accessToken = null

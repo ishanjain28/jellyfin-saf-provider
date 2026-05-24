@@ -282,44 +282,22 @@ class JellyfinMusicProvider : DocumentsProvider() {
 						runBlocking { jellyfinClient.getAlbumTracks(parentDocumentId.albumId) }
 					
 					tracks.forEach withContext@{ track ->
-						val (meta, lyrics) = runBlocking {
-							val p1 = async {
-								jellyfinClient.getTrackMetadata(track.id)
-							}
-							
-							// Fetch lyrics!
-							var p2 = if (projection != null && (projection.contains(
-									COLUMN_TRACK_LYRICS
-								) || projection.contains(
-									COLUMN_TRACK_LYRICS_SYNCED
-								))
-							) {
-								async { jellyfinClient.getLyrics(track.id) }
-							} else {
-								async { null }
-							}
-							
-							p1.await() to p2.await()
-						}
-						val metadata = meta ?: return@withContext
-						
 						result.newRow().apply {
 							add(
 								DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentId.forTrack(
 									parentDocumentId.albumId,
 									track.id,
-									metadata.size ?: 0L,
-									metadata.duration ?: 0L
+									track.size ?: 0L,
+									track.duration ?: 0L
 								)
 							)
-							add(DocumentsContract.Document.COLUMN_MIME_TYPE, metadata.mimeType)
+							add(DocumentsContract.Document.COLUMN_MIME_TYPE, track.mimeType)
 							add(
-								DocumentsContract.Document.COLUMN_DISPLAY_NAME, metadata.title
+								DocumentsContract.Document.COLUMN_DISPLAY_NAME, track.title
 							)
-							add(DocumentsContract.Document.COLUMN_SIZE, metadata.size)
+							add(DocumentsContract.Document.COLUMN_SIZE, track.size)
 							add(
-								DocumentsContract.Document.COLUMN_LAST_MODIFIED,
-								metadata.lastFetched
+								DocumentsContract.Document.COLUMN_LAST_MODIFIED, track.lastFetched
 							)
 							add(
 								DocumentsContract.Document.COLUMN_FLAGS,
@@ -327,29 +305,23 @@ class JellyfinMusicProvider : DocumentsProvider() {
 							)
 							
 							// Poweramp metadata
-							add(MediaStore.Audio.Media.TITLE, metadata.title)
+							add(MediaStore.Audio.Media.TITLE, track.title)
 							add(
-								MediaStore.Audio.Media.ARTIST, metadata.artist
+								MediaStore.Audio.Media.ARTIST, track.artist
 							)
-							add(MediaStore.Audio.Media.ALBUM, metadata.album)
-							add(MediaStore.Audio.Media.DURATION, metadata.duration)
-							add(MediaStore.Audio.Media.YEAR, metadata.year)
-							add(MediaStore.Audio.Media.TRACK, metadata.trackNumber)
-							add(MediaStore.Audio.Media.DISC_NUMBER, metadata.discNumber)
-							add(MediaStore.Audio.AudioColumns.TRACK, metadata.trackNumber)
-							add(MediaStore.Audio.Media.DATE_ADDED, metadata.dateCreated)
-							add(MediaStore.Audio.Media.IS_FAVORITE, metadata.isFavourite)
-							add(MediaStore.Audio.Media.ALBUM_ARTIST, metadata.albumArtist)
+							add(MediaStore.Audio.Media.ALBUM, track.album)
+							add(MediaStore.Audio.Media.DURATION, track.duration)
+							add(MediaStore.Audio.Media.YEAR, track.year)
+							add(MediaStore.Audio.Media.TRACK, track.trackNumber)
+							add(MediaStore.Audio.Media.DISC_NUMBER, track.discNumber)
+							add(MediaStore.Audio.AudioColumns.TRACK, track.trackNumber)
+							add(MediaStore.Audio.Media.DATE_ADDED, track.dateCreated)
+							add(MediaStore.Audio.Media.IS_FAVORITE, track.isFavourite)
+							add(MediaStore.Audio.Media.ALBUM_ARTIST, track.albumArtist)
 							add(
-								MediaStore.Audio.Media.GENRE, metadata.genres
+								MediaStore.Audio.Media.GENRE, track.genres
 							)
 							add(MediaStore.Audio.Media.IS_MUSIC, 1)
-							if (lyrics != null) {
-								add(COLUMN_TRACK_LYRICS, lyrics.content)
-								if (lyrics.isSynced) {
-									add(COLUMN_TRACK_LYRICS_SYNCED, lyrics.content)
-								}
-							}
 							
 							// Poweramp flags
 							add("com.maxmpz.poweramp.provider.COLUMN_FLAGS", 0x1)
