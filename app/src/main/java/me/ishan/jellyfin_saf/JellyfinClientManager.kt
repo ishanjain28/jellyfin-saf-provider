@@ -144,6 +144,12 @@ class JellyfinClientManager(private val context: Context? = null) {
 	}
 	
 	fun updateCredentials(url: String, user: String, pass: String) {
+		val url = if (!url.startsWith("http://") && !url.startsWith("https://")) {
+			"http://$url"
+		} else {
+			url
+		}
+		
 		serverUrl = url.trimEnd('/')
 		username = user
 		password = pass
