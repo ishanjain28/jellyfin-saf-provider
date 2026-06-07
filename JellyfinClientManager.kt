@@ -1,0 +1,819 @@
+package me.ishan.jellyfin_saf
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.SharedPreferences
+import android.graphics.Point
+import android.os.Build
+import android.util.Log
+import android.webkit.MimeTypeMap
+import androidx.core.content.edit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
+import me.ishan.jellyfin_saf.db.AppDatabase
+import me.ishan.jellyfin_saf.db.TrackEntity
+import me.ishan.jellyfin_saf.db.TrackLyricsEntity
+import okhttp3.ConnectionPool
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okio.buffer
+import okio.sink
+import org.jellyfin.sdk.Jellyfin
+import org.jellyfin.sdk.api.client.ApiClient
+import org.jellyfin.sdk.api.client.exception.InvalidStatusException
+import org.jellyfin.sdk.api.client.extensions.audioApi
+import org.jellyfin.sdk.api.client.extensions.authenticateUserByName
+import org.jellyfin.sdk.api.client.extensions.imageApi
+import org.jellyfin.sdk.api.client.extensions.itemsApi
+import org.jellyfin.sdk.api.client.extensions.lyricsApi
+import org.jellyfin.sdk.api.client.extensions.sessionApi
+import org.jellyfin.sdk.api.client.extensions.systemApi
+import org.jellyfin.sdk.api.client.extensions.userApi
+import org.jellyfin.sdk.api.client.extensions.userLibraryApi
+import org.jellyfin.sdk.createJellyfin
+import org.jellyfin.sdk.model.ClientInfo
+import org.jellyfin.sdk.model.DeviceInfo
+import org.jellyfin.sdk.model.UUID
+import org.jellyfin.sdk.model.api.BaseItemDto
+import org.jellyfin.sdk.model.api.BaseItemKind
+import org.jellyfin.sdk.model.api.ImageType
+import org.jellyfin.sdk.model.api.ItemFields
+import java.io.File
+import java.nio.channels.FileChannel
+import java.util.concurrent.TimeUnit
+import kotlin.io.path.Path
+import kotlin.io.path.extension
+
+class JellyfinClientManager(private val context: Context? = null) {
+	private val cryptoManager = CryptoManager()
+	
+	private val httpClient = OkHttpClient.Builder().addInterceptor { chain ->
+		return@addInterceptor chain.proceed(
+			chain.request().newBuilder().header(
+				"User-Agent",
+				"${context?.getString(R.string.app_name)}/${context?.getString(R.string.app_version)} via okhttp/${okhttp3.OkHttp.VERSION}"
+			).build()
+		)
+	}.connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
+		.writeTimeout(15, TimeUnit.SECONDS).callTimeout(60, TimeUnit.SECONDS).connectionPool(
+			ConnectionPool(
+				maxIdleConnections = 5, keepAliveDuration = 5, TimeUnit.MINUTES
+			)
+		).retryOnConnectionFailure(true).build()
+	
+	private val prefs: SharedPreferences? =
+		context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+	
+	private val db = context?.let { AppDatabase.getDatabase(it) }
+	private var jellyfin: Jellyfin? = null
+	private var api: ApiClient? = null
+	private var currentUserId: UUID? = null
+	
+	// Credentials
+	private var serverUrl: String = ""
+	private var username: String = ""
+	private var password: String = ""
+	private var accessToken: String? = null
+	
+	init {
+		loadCredentials()
+		initializeJellyfin()
+	}
+	
+	private fun initializeJellyfin() {
+		context.let { ctx ->
+			jellyfin = createJellyfin {
+				context = ctx
+				clientInfo = ClientInfo(
+					name = context?.getString(R.string.app_name) ?: "Android Jellyfin Provider",
+					version = context?.getString(R.string.app_version) ?: "0.0.1"
+				)
+				deviceInfo = DeviceInfo(
+					id = getDeviceId(), name = Build.MODEL
+				)
+			}
+		}
+	}
+	
+	private fun loadCredentials() {
+		prefs?.let { p ->
+			serverUrl = p.getString(KEY_SERVER_URL, "") ?: ""
+			username = p.getString(KEY_USERNAME, "") ?: ""
+			
+			// Decrypt sensitive data
+			val encryptedPassword = p.getString(KEY_PASSWORD, null)
+			password = if (!encryptedPassword.isNullOrEmpty()) {
+				try {
+					cryptoManager.decrypt(encryptedPassword)
+				} catch (e: Exception) {
+					""
+				}
+			} else ""
+			
+			val encryptedToken = p.getString(KEY_ACCESS_TOKEN, null)
+			accessToken = if (!encryptedToken.isNullOrEmpty()) {
+				try {
+					cryptoManager.decrypt(encryptedToken)
+				} catch (e: Exception) {
+					null
+				}
+			} else null
+			
+			currentUserId = p.getString(KEY_USER_ID, null)?.let { UUID.fromString(it) }
+		}
+	}
+	
+	fun getUrl(): String = serverUrl
+	fun getUsername(): String = username
+	fun getPassword(): String = password
+	fun getUserId(): UUID? = currentUserId
+	fun getAccessToken(): String? = accessToken
+	fun isAuthenticated(): Boolean {
+		if (accessToken == null || currentUserId == null) {
+			loadCredentials()
+		}
+		return accessToken != null && currentUserId != null
+	}
+	
+	fun getMaxCacheSize(): Long = prefs?.getLong(KEY_MAX_CACHE_SIZE, 2048) ?: 2048
+	
+	fun setMaxCacheSize(sizeMB: Long) {
+		prefs?.edit { putLong(KEY_MAX_CACHE_SIZE, sizeMB) }
+	}
+	
+	fun updateCredentials(url: String, user: String, pass: String) {
+		val url = if (!url.startsWith("http://") && !url.startsWith("https://")) {
+			"http://$url"
+		} else {
+			url
+		}
+		
+		serverUrl = url.trimEnd('/')
+		username = user
+		password = pass
+	}
+	
+	private fun persistCredentials() {
+		prefs?.edit {
+			putString(KEY_SERVER_URL, serverUrl)
+			putString(KEY_USERNAME, username)
+			
+			// Encrypt password
+			val encryptedPassword = try {
+				cryptoManager.encrypt(password)
+			} catch (e: Exception) {
+				""
+			}
+			putString(KEY_PASSWORD, encryptedPassword)
+			
+			// Encrypt token
+			val encryptedToken = try {
+				accessToken?.let { cryptoManager.encrypt(it) }
+			} catch (e: Exception) {
+				null
+			}
+			putString(KEY_ACCESS_TOKEN, encryptedToken)
+			
+			putString(KEY_USER_ID, currentUserId.toString())
+		}
+	}
+	
+	/**
+	 * Authenticate with Jellyfin server
+	 */
+	suspend fun login(): Boolean = withContext(Dispatchers.IO) {
+		if (serverUrl.isEmpty() || username.isEmpty()) return@withContext false
+		
+		val jellyfinInstance = jellyfin ?: return@withContext false
+		
+		api = jellyfinInstance.createApi(baseUrl = serverUrl)
+		
+		val authResult = api!!.userApi.authenticateUserByName(
+			username = username, password = password
+		)
+		
+		val token = authResult.content.accessToken
+		val userId = authResult.content.user?.id
+		
+		if (token == null || userId == null) return@withContext false
+		
+		api!!.update(accessToken = token)
+		accessToken = token
+		currentUserId = userId
+		persistCredentials()
+		
+		true
+		// No try/catch — let exceptions propagate to caller
+	}
+	
+	/**
+	 * Logout and clear credentials
+	 */
+	suspend fun logout() {
+		getApiClient()?.sessionApi?.reportSessionEnded()
+		
+		accessToken = null
+		currentUserId = null
+		serverUrl = ""
+		username = ""
+		password = ""
+		
+		prefs?.edit {
+			remove(KEY_ACCESS_TOKEN)
+			remove(KEY_USER_ID)
+			remove(KEY_SERVER_URL)
+			remove(KEY_USERNAME)
+			remove(KEY_PASSWORD)
+		}
+	}
+	
+	/**
+	 * Get authenticated API client
+	 */
+	fun getApiClient(): ApiClient? {
+		if (api == null && isAuthenticated()) {
+			initializeApi()
+		}
+		
+		if (!isAuthenticated()) {
+			Log.w(TAG, "Not authenticated")
+			return null
+		}
+		return api
+	}
+	
+	private fun initializeApi() {
+		if (serverUrl.isEmpty() || accessToken.isNullOrEmpty()) return
+		
+		try {
+			val jellyfinInstance = jellyfin ?: return
+			api = jellyfinInstance.createApi(baseUrl = serverUrl)
+			api!!.update(accessToken = accessToken!!)
+			Log.d(TAG, "API re-initialized from stored credentials")
+		} catch (e: Exception) {
+			Log.e(TAG, "Failed to re-initialize API", e)
+		}
+	}
+	
+	/**
+	 * Test connection to server
+	 */
+	suspend fun testConnection(): Boolean = withContext(Dispatchers.IO) {
+		if (serverUrl.isEmpty()) return@withContext false
+		
+		val jellyfinInstance = jellyfin ?: return@withContext false
+		val testApi = jellyfinInstance.createApi(baseUrl = serverUrl)
+		val systemInfo = testApi.systemApi.getPublicSystemInfo()
+		Log.i(TAG, "Server connection successful: ${systemInfo.content.serverName}")
+		true
+		// No try/catch — let exceptions propagate to caller
+	}
+	
+	/**
+	 * Get library stats (total albums, total tracks)
+	 */
+	suspend fun getLibraryStats(): Pair<Int, Int> = withContext(Dispatchers.IO) {
+		val apiClient = getApiClient() ?: return@withContext 0 to 0
+		val userId = currentUserId ?: return@withContext 0 to 0
+		
+		val albumsResult = apiClient.itemsApi.getItems(
+			userId = userId,
+			includeItemTypes = setOf(BaseItemKind.MUSIC_ALBUM),
+			recursive = true,
+			limit = 1
+		)
+		val tracksResult = apiClient.itemsApi.getItems(
+			userId = userId,
+			includeItemTypes = setOf(BaseItemKind.AUDIO),
+			recursive = true,
+			limit = 1
+		)
+		
+		albumsResult.content.totalRecordCount to tracksResult.content.totalRecordCount
+		// No try/catch — let exceptions propagate to caller
+	}
+	
+	/**
+	 * Get albums from library
+	 */
+	suspend fun getAlbums(
+		limit: Int? = null, startIndex: Int? = null
+	): List<BaseItemDto> = withContext(Dispatchers.IO) {
+		val apiClient = getApiClient() ?: return@withContext emptyList()
+		val userId = currentUserId ?: return@withContext emptyList()
+		
+		try {
+			val result = apiClient.itemsApi.getItems(
+				userId = userId,
+				includeItemTypes = setOf(BaseItemKind.MUSIC_ALBUM),
+				recursive = true,
+				limit = limit,
+				startIndex = startIndex,
+				fields = setOf(ItemFields.GENRES)
+			)
+			
+			result.content.items
+		} catch (e: InvalidStatusException) {
+			Log.w(TAG, "getAlbums limit=$limit startIndex=$startIndex received ${e.status} code")
+			if (e.status == 401) {
+				accessToken = null
+			}
+			emptyList()
+		} catch (e: Exception) {
+			Log.e(TAG, "Failed to get albums", e)
+			emptyList()
+		}
+	}
+	
+	/**
+	 * Get tracks in an album
+	 */
+	suspend fun getAlbumTracks(albumId: UUID): List<TrackEntity> = withContext(Dispatchers.IO) {
+		val apiClient = getApiClient() ?: return@withContext emptyList()
+		val userId = currentUserId ?: return@withContext emptyList()
+		
+		try {
+			val result = apiClient.itemsApi.getItems(
+				userId = userId,
+				parentId = albumId,
+				includeItemTypes = setOf(BaseItemKind.AUDIO),
+				limit = 100,
+				fields = setOf(
+					ItemFields.GENRES, ItemFields.MEDIA_SOURCES, ItemFields.DATE_CREATED
+				),
+				enableImages = false,
+			)
+			
+			val tracks = ArrayList<TrackEntity>(result.content.totalRecordCount)
+			val items = result.content.items
+			items.forEach { track ->
+				if (track.mediaSources == null || track.mediaSources?.size == 0) {
+					return@forEach;
+				}
+				val path = track.path ?: track.mediaSources?.get(0)?.path
+				
+				val mimeType = if (path != null) {
+					val ext = Path(path).extension
+					MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "audio/$ext"
+				} else {
+					"null"
+				}
+				
+				val entity = TrackEntity(
+					id = track.id,
+					title = track.name.orEmpty(),
+					artist = track.artists?.joinToString(";"),
+					albumId = track.albumId,
+					album = track.album ?: "Unknown Album",
+					year = track.productionYear,
+					duration = track.runTimeTicks?.div(10000) ?: 0L,
+					size = track.mediaSources?.firstOrNull()?.size ?: 0L,
+					genres = track.genres?.joinToString(";"),
+					trackNumber = track.indexNumber,
+					numTracks = track.indexNumberEnd ?: 0,
+					discNumber = track.parentIndexNumber,
+					dateModified = track.dateCreated?.toString(),
+					mimeType = mimeType,
+					albumArtist = track.albumArtist ?: "",
+					dateCreated = track.premiereDate?.toString(),
+					isFavourite = track.userData?.isFavorite ?: false,
+					lastFetched = System.currentTimeMillis()
+				)
+				
+				db?.trackDao()?.insertTrack(entity)
+				tracks.add(entity);
+			}
+			
+			tracks
+		} catch (e: InvalidStatusException) {
+			Log.w(TAG, "getAlbumTracks $albumId received ${e.status} code")
+			if (e.status == 401) {
+				accessToken = null
+			}
+			emptyList()
+		} catch (e: Exception) {
+			Log.e(TAG, "Failed to get album tracks", e)
+			emptyList()
+		}
+	}
+	
+	/**
+	 * Get single track metadata by ID
+	 */
+	suspend fun getTrackMetadata(trackId: UUID): TrackEntity? = withContext(Dispatchers.IO) {
+		val apiClient = getApiClient() ?: return@withContext null
+		val userId = currentUserId ?: return@withContext null
+		
+		val meta = db?.trackDao()?.getTrackById(trackId)
+		val isStale =
+			meta == null || (System.currentTimeMillis() - meta.lastFetched) >= 2 * 24 * 60 * 60 * 1000L
+		if (meta != null && !isStale) {
+			return@withContext meta
+		}
+		
+		try {
+			val result = apiClient.userLibraryApi.getItem(
+				userId = userId, itemId = trackId
+			)
+			
+			val item = result.content
+			val path = item.path ?: item.mediaSources?.get(0)?.path
+			
+			val mimeType = if (path != null) {
+				val ext = Path(path).extension
+				MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "audio/$ext"
+			} else {
+				"null"
+			}
+			
+			val entity = TrackEntity(
+				id = trackId,
+				title = item.name.orEmpty(),
+				artist = item.artists?.joinToString(";"),
+				albumId = item.albumId,
+				album = item.album ?: "Unknown Album",
+				year = item.productionYear,
+				duration = item.runTimeTicks?.div(10000) ?: 0L,
+				size = item.mediaSources?.firstOrNull()?.size ?: 0L,
+				genres = item.genres?.joinToString(";"),
+				trackNumber = item.indexNumber,
+				numTracks = item.indexNumberEnd ?: 0,
+				discNumber = item.parentIndexNumber,
+				dateModified = item.dateCreated?.toString(),
+				mimeType = mimeType,
+				albumArtist = item.albumArtist ?: "",
+				dateCreated = item.dateCreated?.toString(),
+				isFavourite = item.userData?.isFavorite ?: false,
+				lastFetched = System.currentTimeMillis()
+			)
+			
+			db?.trackDao()?.insertTrack(entity)
+			
+			return@withContext entity
+		} catch (e: InvalidStatusException) {
+			Log.w(TAG, "getItem item=$trackId received ${e.status} code, returning stale data")
+			if (e.status == 401) {
+				accessToken = null
+			}
+			meta
+		} catch (e: Exception) {
+			Log.e(TAG, "Failed to get item, returning stale data", e)
+			meta
+		}
+	}
+	
+	/**
+	 * Download track using OkHttpClient for direct streaming
+	 */
+	suspend fun downloadTrack(
+		trackId: UUID,
+		outputFile: FileChannel,
+		byteOffset: Long = 0L,
+		byteLength: Long? = null,
+		onProgress: ((Long) -> Unit)? = null,
+	): Unit = withContext(Dispatchers.IO) {
+		val url = getStreamUrl(trackId) ?: return@withContext
+		val token = accessToken ?: return@withContext
+		
+		try {
+			val requestBuilder = Request.Builder().url(url).header("X-Emby-Token", token)
+			
+			if (byteLength != null) {
+				requestBuilder.header("Range", "bytes=$byteOffset-${byteOffset + byteLength - 1}")
+			} else {
+				requestBuilder.header("Range", "bytes=$byteOffset-")
+			}
+			
+			val call = httpClient.newCall(requestBuilder.build())
+			
+			// Cancel okhttp download on coroutine cancellation
+			coroutineContext[Job]?.invokeOnCompletion { cause ->
+				if (cause != null) {
+					call.cancel()
+				}
+			}
+			
+			call.execute().use { response ->
+				if (!response.isSuccessful && response.code != 206) {
+					Log.e(
+						TAG,
+						"[$trackId] Download failed: HTTP ${response.code} (offset=$byteOffset) (channelSize=${outputFile.size()})"
+					)
+					return@withContext
+				}
+				
+				val body = response.body
+				val input = body.byteStream()
+				val buffer = ByteArray(32 * 1024)
+				var bytesRead: Int
+				var totalDownloaded = 0L
+				var lastProgressBoundary = 0L
+				val progressThreshold = 512 * 1024  // 512KB
+				
+				while (input.read(buffer).also { bytesRead = it } != -1) {
+					outputFile.writeAt(buffer, byteOffset + totalDownloaded, 0, bytesRead)
+					totalDownloaded += bytesRead
+					
+					val currentBoundary = totalDownloaded / progressThreshold
+					if (currentBoundary > lastProgressBoundary) {
+						onProgress?.invoke(byteOffset + totalDownloaded)
+						lastProgressBoundary = currentBoundary
+						
+						// return if canceled
+						if (!isActive) {
+							Log.d(
+								TAG,
+								"[$trackId] Download interrupted. read $totalDownloaded starting from $byteOffset"
+							)
+							return@withContext
+						}
+					}
+				}
+				
+				// Final progress update to ensure 	we report completion
+				onProgress?.invoke(byteOffset + totalDownloaded)
+			}
+			true
+		} catch (e: InvalidStatusException) {
+			Log.w(TAG, "[$trackId] HTTP ${e.status} at offset $byteOffset")
+			if (e.status == 401) {
+				accessToken = null
+			}
+		} catch (e: Exception) {
+			// log exception
+			if (e !is java.util.concurrent.CancellationException) {
+				Log.d(TAG, "[$trackId] Download interrupted: ${e.message}")
+			}
+		}
+	}
+	
+	/**
+	 * Get track stream URL using SDK's URL builder
+	 */
+	fun getStreamUrl(trackId: UUID): String? {
+		val apiClient = getApiClient() ?: return null
+		
+		// Use SDK's URL construction with static=true
+		return apiClient.audioApi.getAudioStreamUrl(
+			itemId = trackId,
+			static = true,
+			deviceId = getDeviceId(),
+		)
+	}
+	
+	/**
+	 * Download album art using SDK's image API
+	 */
+	suspend fun downloadAlbumArt(
+		itemId: UUID, outputFile: File, sizeHint: Point?,
+	): Boolean = withContext(Dispatchers.IO) {
+		val apiClient = getApiClient() ?: return@withContext false
+		// Use SDK's image API
+		val url = apiClient.imageApi.getItemImageUrl(
+			itemId = itemId,
+			imageType = ImageType.PRIMARY,
+			maxWidth = sizeHint?.x ?: 1000,
+			maxHeight = sizeHint?.y ?: 1000,
+			quality = 90,
+		)
+		val token = accessToken ?: return@withContext false
+		
+		try {
+			val requestBuilder = Request.Builder().url(url).header("X-Emby-Token", token)
+			
+			val call = httpClient.newCall(requestBuilder.build())
+			call.execute().use { response ->
+				if (!response.isSuccessful) {
+					return@withContext false
+				}
+				
+				response.body.source().use { source ->
+					outputFile.sink().buffer().use { sink ->
+						sink.writeAll(source)
+						return@withContext true
+					}
+				}
+			}
+		} catch (e: InvalidStatusException) {
+			Log.w(
+				TAG, "downloadAlbumArt item=$itemId sizeHint=$sizeHint received ${e.status} code"
+			)
+			if (e.status == 401) {
+				accessToken = null
+			}
+			false
+		} catch (e: Exception) {
+			// run this just in case it failed because parent dir was wiped out after "Clean Cache"
+			outputFile.parentFile?.mkdirs()
+			Log.e(TAG, "Failed to get Album Art for $itemId", e)
+			false
+		}
+	}
+	
+	/**
+	 * Download lyrics using SDK's lyrics API and format as LRC if synced
+	 */
+	@SuppressLint("DefaultLocale")
+	suspend fun getLyrics(trackId: UUID): TrackLyricsEntity? {
+		val apiClient = getApiClient() ?: return null
+		
+		val data = db?.trackDao()?.getTrackLyricsById(trackId)
+		if (data != null && !data.isStale()) {
+			return data
+		}
+		
+		return try {
+			val response = apiClient.lyricsApi.getLyrics(trackId)
+			val lyricDto = response.content
+			
+			val isSynced = lyricDto.metadata.isSynced ?: (lyricDto.lyrics.any { it.start != null })
+			
+			val sb = StringBuilder()
+			lyricDto.lyrics.forEach { line ->
+				if (line.start != null) {
+					val ticks = line.start!!
+					val totalMilliseconds = ticks / 10_000
+					val minutes = totalMilliseconds / 60_000
+					val seconds = (totalMilliseconds % 60_000) / 1000
+					val hundredths = (totalMilliseconds % 1000) / 10
+					sb.append(
+						String.format(
+							"[%02d:%02d.%02d]%s\n", minutes, seconds, hundredths, line.text
+						)
+					)
+				} else {
+					sb.append(line.text).append("\n")
+				}
+			}
+			val lyrics = sb.toString()
+			
+			val entity = TrackLyricsEntity(trackId, lyrics, isSynced, System.currentTimeMillis())
+			db?.trackDao()?.insertTrackLyrics(entity)
+			
+			entity
+		} catch (e: InvalidStatusException) {
+			Log.w(
+				TAG, "getLyrics track=$trackId received ${e.status} code, returning stale data"
+			)
+			if (e.status == 401) {
+				accessToken = null
+			}
+			data
+		} catch (e: Exception) {
+			Log.e(TAG, "Failed to get lyrics for $trackId, returning stale data", e)
+			data
+		}
+	}
+	
+	/**
+	 * Report playback start using SDK
+	 */
+//    suspend fun reportPlaybackStart(
+//        trackId: UUID, canSeek: Boolean = true
+//    ) = withContext(Dispatchers.IO) {
+//        val apiClient = getApiClient() ?: return@withContext
+//
+//        try {
+//            apiClient.playStateApi.reportPlaybackStart(
+//                playbackStartInfo = PlaybackStartInfo(
+//                    itemId = trackId,
+//                    canSeek = canSeek,
+//                    isPaused = false,
+//                    isMuted = false,
+//                    repeatMode = RepeatMode.REPEAT_NONE
+//                )
+//            )
+//            Log.d(TAG, "Reported playback start for track $trackId")
+//        } catch (e: Exception) {
+//            Log.e(TAG, "Failed to report playback start", e)
+//        }
+//    }
+	
+	/**
+	//     * Report playback progress using SDK
+	//     */
+//    suspend fun reportPlaybackProgress(
+//        trackId: UUID, positionTicks: Long, isPaused: Boolean = false, isMuted: Boolean = false
+//    ) = withContext(Dispatchers.IO) {
+//        val apiClient = getApiClient() ?: return@withContext
+//
+//        try {
+//            apiClient.playStateApi.reportPlaybackProgress(
+//                playbackProgressInfo = PlaybackProgressInfo(
+//                    itemId = trackId,
+//                    positionTicks = positionTicks,
+//                    isPaused = isPaused,
+//                    isMuted = isMuted,
+//                    canSeek = true,
+//                    repeatMode = RepeatMode.REPEAT_NONE
+//                )
+//            )
+//        } catch (e: Exception) {
+//            Log.e(TAG, "Failed to report playback progress", e)
+//        }
+//    }
+//
+//    /**
+//     * Report playback stopped / Scrobble using SDK
+//     */
+//    suspend fun reportPlaybackStopped(
+//        trackId: UUID, positionTicks: Long
+//    ) = withContext(Dispatchers.IO) {
+//        val apiClient = getApiClient() ?: return@withContext
+//
+//        try {
+//            apiClient.playStateApi.reportPlaybackStopped(
+//                playbackStopInfo = PlaybackStopInfo(
+//                    itemId = trackId, positionTicks = positionTicks
+//                )
+//            )
+//            Log.d(TAG, "Reported playback stopped for track $trackId")
+//        } catch (e: Exception) {
+//            Log.e(TAG, "Failed to report playback stopped", e)
+//        }
+//    }
+//
+//	suspend fun makeRequest(req: Request.Builder): Boolean = withContext(Dispatchers.IO) {
+//		val token = accessToken ?: return@withContext false
+//		val req = req.header("X-Emby-Token", token)
+//
+//		try {
+//			val call = httpClient.newCall(req.build())
+//
+//			// Cancel okhttp download on coroutine cancellation
+//			coroutineContext[Job]?.invokeOnCompletion { cause ->
+//				if (cause != null) {
+//					call.cancel()
+//				}
+//			}
+//
+//			call.execute().use { response ->
+//				if (!response.isSuccessful) {
+//					Log.e(
+//						TAG,
+//						"[$trackId] Download failed: HTTP ${response.code} (offset=$byteOffset) (channelSize=${outputFile.size()})"
+//					)
+//					return@withContext false
+//				}
+//
+//				val body = response.body
+//				val input = body.byteStream()
+//				val buffer = ByteArray(32 * 1024)
+//				var bytesRead: Int
+//				var totalDownloaded = 0L
+//				var lastProgressBoundary = 0L
+//				val progressThreshold = 512 * 1024  // 512KB
+//
+//				while (input.read(buffer).also { bytesRead = it } != -1) {
+//					outputFile.writeAt(buffer, byteOffset + totalDownloaded, 0, bytesRead)
+//					totalDownloaded += bytesRead
+//
+//					val currentBoundary = totalDownloaded / progressThreshold
+//					if (currentBoundary > lastProgressBoundary) {
+//						onProgress?.invoke(totalDownloaded)
+//						lastProgressBoundary = currentBoundary
+//					}
+//				}
+//
+//				// Final progress update to ensure we report completion
+//				onProgress?.invoke(totalDownloaded)
+//			}
+//			true
+//		} catch (e: InvalidStatusException) {
+//			Log.w(TAG, "[$trackId] HTTP ${e.status} at offset $byteOffset")
+//			if (e.status == 401) {
+//				accessToken = null
+//			}
+//			false
+//		} catch (e: Exception) {
+//			// log if it's not a cancellation
+//			if (e !is java.util.concurrent.CancellationException) {
+//				Log.d(TAG, "[$trackId] Download interrupted: ${e.message}")
+//			}
+//			false
+//		}
+//	}
+	private fun getDeviceId(): String {
+		val deviceId = prefs?.getString(KEY_DEVICE_ID, null) ?: run {
+			val id = UUID.randomUUID().toString()
+			prefs?.edit { putString(KEY_DEVICE_ID, id) }
+			id
+		}
+		return deviceId
+	}
+	
+	companion object {
+		private const val TAG = "JellyfinClientManager"
+		
+		private const val PREFS_NAME = "jellyfin_prefs"
+		private const val KEY_SERVER_URL = "server_url"
+		private const val KEY_USERNAME = "username"
+		private const val KEY_PASSWORD = "password"
+		private const val KEY_ACCESS_TOKEN = "access_token"
+		private const val KEY_USER_ID = "user_id"
+		private const val KEY_DEVICE_ID = "device_id"
+		private const val KEY_MAX_CACHE_SIZE = "max_cache_size"
+	}
+}
